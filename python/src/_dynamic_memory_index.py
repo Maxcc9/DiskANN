@@ -1,6 +1,9 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT license.
 
+# 本檔案定義了 `DynamicMemoryIndex` 類別，這是使用者與動態記憶體索引互動的主要 Python 介面。
+# 它封裝了底層的 C++ 綁定，提供了建立、搜尋、插入和刪除向量的功能。
+
 import os
 import warnings
 from pathlib import Path
@@ -39,16 +42,8 @@ __ALL__ = ["DynamicMemoryIndex"]
 
 class DynamicMemoryIndex:
     """
-    A DynamicMemoryIndex instance is used to both search and mutate a `diskannpy` memory index. This index is unlike
-    either `diskannpy.StaticMemoryIndex` or `diskannpy.StaticDiskIndex` in the following ways:
-
-    - It requires an explicit vector identifier for each vector added to it.
-    - Insert and (lazy) deletion operations are provided for a flexible, living index
-
-    The mutable aspect of this index will absolutely impact search time performance as new vectors are added and
-    old deleted. `DynamicMemoryIndex.consolidate_deletes()` should be called periodically to restructure the index
-    to remove deleted vectors and improve per-search performance, at the cost of an expensive index consolidation to
-    occur.
+    一個可變的、完全載入到記憶體中的 DiskANN 索引。
+    與靜態索引不同，它支援向量的插入和刪除。
     """
 
     @classmethod
@@ -73,80 +68,24 @@ class DynamicMemoryIndex:
         dimensions: Optional[int] = None,
     ) -> "DynamicMemoryIndex":
         """
-        The `from_file` classmethod is used to load a previously saved index from disk. This index *must* have been
-        created with a valid `tags` file or `tags` np.ndarray of `diskannpy.VectorIdentifier`s. It is *strongly*
-        recommended that you use the same parameters as the `diskannpy.build_memory_index()` function that created
-        the index.
-
-        ### Parameters
-        - **index_directory**: The directory containing the index files. This directory must contain the following
-            files:
-            - `{index_prefix}.data`
-            - `{index_prefix}.tags`
-            - `{index_prefix}`
-
-          It may also include the following optional files:
-            - `{index_prefix}_vectors.bin`: Optional. `diskannpy` builder functions may create this file in the
-              `index_directory` if the index was created from a numpy array
-            - `{index_prefix}_metadata.bin`: Optional. `diskannpy` builder functions create this file to store metadata
-            about the index, such as vector dtype, distance metric, number of vectors and vector dimensionality.
-            If an index is built from the `diskann` cli tools, this file will not exist.
-        - **max_vectors**: Capacity of the memory index including space for future insertions.
-        - **complexity**: Complexity (a.k.a `L`) references the size of the list we store candidate approximate
-          neighbors in. It's used during save (which is an index rebuild), and it's used as an initial search size to
-          warm up our index and lower the latency for initial real searches.
-        - **graph_degree**: Graph degree (a.k.a. `R`) is the maximum degree allowed for a node in the index's graph
-          structure. This degree will be pruned throughout the course of the index build, but it will never grow beyond
-          this value. Higher R values require longer index build times, but may result in an index showing excellent
-          recall and latency characteristics.
-        - **saturate_graph**: If True, the adjacency list of each node will be saturated with neighbors to have exactly
-          `graph_degree` neighbors. If False, each node will have between 1 and `graph_degree` neighbors.
-        - **max_occlusion_size**: The maximum number of points that can be considered by occlude_list function.
-        - **alpha**: The alpha parameter (>=1) is used to control the nature and number of points that are added to the
-          graph. A higher alpha value (e.g., 1.4) will result in fewer hops (and IOs) to convergence, but probably
-          more distance comparisons compared to a lower alpha value.
-        - **num_threads**: Number of threads to use when creating this index. `0` indicates we should use all available
-          logical processors.
-        - **filter_complexity**: Complexity to use when using filters. Default is 0.
-        - **num_frozen_points**: Number of points to freeze. Default is 1.
-        - **initial_search_complexity**: Should be set to the most common `complexity` expected to be used during the
-          life of this `diskannpy.DynamicMemoryIndex` object. The working scratch memory allocated is based off of
-          `initial_search_complexity` * `search_threads`. Note that it may be resized if a `search` or `batch_search`
-          operation requests a space larger than can be accommodated by these values.
-        - **search_threads**: Should be set to the most common `num_threads` expected to be used during the
-          life of this `diskannpy.DynamicMemoryIndex` object. The working scratch memory allocated is based off of
-          `initial_search_complexity` * `search_threads`. Note that it may be resized if a `batch_search`
-          operation requests a space larger than can be accommodated by these values.
-        - **concurrent_consolidation**: This flag dictates whether consolidation can be run alongside inserts and
-          deletes, or whether the index is locked down to changes while consolidation is ongoing.
-        - **index_prefix**: The prefix of the index files. Defaults to "ann".
-        - **distance_metric**: A `str`, strictly one of {"l2", "mips", "cosine"}. `l2` and `cosine` are supported for all 3
-          vector dtypes, but `mips` is only available for single precision floats. Default is `None`. **This
-          value is only used if a `{index_prefix}_metadata.bin` file does not exist.** If it does not exist,
-          you are required to provide it.
-        - **vector_dtype**: The vector dtype this index has been built with. **This value is only used if a
-          `{index_prefix}_metadata.bin` file does not exist.** If it does not exist, you are required to provide it.
-        - **dimensions**: The vector dimensionality of this index. All new vectors inserted must be the same
-          dimensionality. **This value is only used if a `{index_prefix}_metadata.bin` file does not exist.** If it
-          does not exist, you are required to provide it.
-
-        ### Returns
-        A `diskannpy.DynamicMemoryIndex` object, with the index loaded from disk and ready to use for insertions,
-        deletions, and searches.
-
+        一個類別方法，用於從磁碟載入一個先前儲存的動態索引。
+        這是載入索引的建議方式。
         """
         index_prefix_path = _valid_index_prefix(index_directory, index_prefix)
 
-        # do tags exist?
+        # 動態索引必須有 .tags 檔案
         tags_file = index_prefix_path + ".tags"
         _assert(
             Path(tags_file).exists(),
             f"The file {tags_file} does not exist in {index_directory}",
         )
+        
+        # 讀取或確認元資料
         vector_dtype, dap_metric, num_vectors, dimensions = _ensure_index_metadata(
             index_prefix_path, vector_dtype, distance_metric, max_vectors, dimensions, warn_size_exceeded=True
         )
 
+        # 步驟 1: 呼叫 __init__ 建立一個空的、但已設定好參數的索引物件。
         index = cls(
             distance_metric=dap_metric,  # type: ignore
             vector_dtype=vector_dtype,
@@ -263,6 +202,8 @@ class DynamicMemoryIndex:
         else:
             _index = _native_dap.DynamicMemoryFloatIndex
 
+        # --- 實例化 C++ 索引物件 ---
+        # 這裡會呼叫 C++ 封裝層的建構函式，進而建立一個已設定好動態索引參數的 `diskann::Index` 物件。
         self._index = _index(
             distance_metric=dap_metric,
             dimensions=dimensions,
@@ -489,11 +430,8 @@ class DynamicMemoryIndex:
 
     def mark_deleted(self, vector_id: VectorIdentifier):
         """
-        Mark vector for deletion. This is a soft delete that won't return the vector id in any results, but does not
-        remove it from the underlying index files or memory structure. To execute a hard delete, call this method and
-        then call the much more expensive `consolidate_delete` method on this index.
-        ### Parameters
-        - **vector_id**: The vector id to delete. Must be a uint32.
+        將向量標記為已刪除 (軟刪除)。
+        該向量不會再出現在搜尋結果中，但其實體仍存在於索引結構中。
         """
         _assert_is_positive_uint32(vector_id, "vector_id")
         self._points_deleted = True
@@ -503,7 +441,8 @@ class DynamicMemoryIndex:
 
     def consolidate_delete(self):
         """
-        This method actually restructures the DiskANN index to remove the items that have been marked for deletion.
+        整理索引，實際地從圖結構中移除所有被標記為刪除的點 (硬刪除)。
+        這是一個耗時的操作。
         """
         self._index.consolidate_delete()
         self._points_deleted = False

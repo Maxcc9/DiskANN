@@ -1,6 +1,9 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT license.
 
+# 本檔案定義了 `StaticDiskIndex` 類別，這是使用者與靜態磁碟索引互動的主要 Python 介面。
+# 它封裝了底層的 C++ `PQFlashIndex` 綁定，提供了參數驗證和更易於使用的 API。
+
 import os
 import warnings
 from typing import Optional
@@ -32,7 +35,7 @@ __ALL__ = ["StaticDiskIndex"]
 
 class StaticDiskIndex:
     """
-    A StaticDiskIndex is a disk-backed index that is not mutable.
+    一個不可變的、以磁碟為後端的 DiskANN 索引。
     """
 
     def __init__(
@@ -47,58 +50,44 @@ class StaticDiskIndex:
         index_prefix: str = "ann",
     ):
         """
-        ### Parameters
-        - **index_directory**: The directory containing the index files. This directory must contain the following
-            files:
-            - `{index_prefix}_sample_data.bin`
-            - `{index_prefix}_mem.index.data`
-            - `{index_prefix}_pq_compressed.bin`
-            - `{index_prefix}_pq_pivots.bin`
-            - `{index_prefix}_sample_ids.bin`
-            - `{index_prefix}_disk.index`
+        建構函式，用於載入一個已存在的磁碟索引。
 
-          It may also include the following optional files:
-            - `{index_prefix}_vectors.bin`: Optional. `diskannpy` builder functions may create this file in the
-              `index_directory` if the index was created from a numpy array
-            - `{index_prefix}_metadata.bin`: Optional. `diskannpy` builder functions create this file to store metadata
-            about the index, such as vector dtype, distance metric, number of vectors and vector dimensionality.
-            If an index is built from the `diskann` cli tools, this file will not exist.
-        - **num_threads**: Number of threads to use when searching this index. (>= 0), 0 = num_threads in system
-        - **num_nodes_to_cache**: Number of nodes to cache in memory (> -1)
-        - **cache_mechanism**: 1 -> use the generated sample_data.bin file for
-            the index to initialize a set of cached nodes, up to `num_nodes_to_cache`, 2 -> ready the cache for up to
-            `num_nodes_to_cache`, but do not initialize it with any nodes. Any other value disables node caching.
-        - **distance_metric**: A `str`, strictly one of {"l2", "mips", "cosine"}. `l2` and `cosine` are supported for all 3
-          vector dtypes, but `mips` is only available for single precision floats. Default is `None`. **This
-          value is only used if a `{index_prefix}_metadata.bin` file does not exist.** If it does not exist,
-          you are required to provide it.
-        - **vector_dtype**: The vector dtype this index has been built with. **This value is only used if a
-          `{index_prefix}_metadata.bin` file does not exist.** If it does not exist, you are required to provide it.
-        - **dimensions**: The vector dimensionality of this index. All new vectors inserted must be the same
-          dimensionality. **This value is only used if a `{index_prefix}_metadata.bin` file does not exist.** If it
-          does not exist, you are required to provide it.
-        - **index_prefix**: The prefix of the index files. Defaults to "ann".
+        ### 參數
+        - **index_directory**: 包含索引檔案的目錄。
+        - **num_threads**: 搜尋時使用的執行緒數。
+        - **num_nodes_to_cache**: 要快取到記憶體中的節點數量。
+        - **cache_mechanism**: 快取策略。1=根據樣本查詢快取熱點，2=快取圖的頂層節點。
+        - ... (其他元資料參數)
         """
         index_prefix_path = _valid_index_prefix(index_directory, index_prefix)
+        
+        # --- 載入元資料 ---
         vector_dtype, metric, _, _ = _ensure_index_metadata(
             index_prefix_path,
             vector_dtype,
             distance_metric,
-            1,  # it doesn't matter because we don't need it in this context anyway
+            1,  # 在此上下文中 max_vectors 不重要
             dimensions,
         )
         dap_metric = _valid_metric(metric)
 
+        # --- 參數驗證 ---
         _assert_is_nonnegative_uint32(num_threads, "num_threads")
         _assert_is_nonnegative_uint32(num_nodes_to_cache, "num_nodes_to_cache")
 
         self._vector_dtype = vector_dtype
+        
+        # --- 根據資料類型，選擇對應的底層 C++ 原生類別 ---
         if vector_dtype == np.uint8:
             _index = _native_dap.StaticDiskUInt8Index
         elif vector_dtype == np.int8:
             _index = _native_dap.StaticDiskInt8Index
         else:
             _index = _native_dap.StaticDiskFloatIndex
+        
+        # --- 實例化並載入 C++ 索引物件 ---
+        # 這裡會呼叫 C++ 封裝層的建構函式，進而觸發底層 C++ `PQFlashIndex` 的 `load` 方法，
+        # 並根據 cache_mechanism 執行預熱。
         self._index = _index(
             distance_metric=dap_metric,
             index_path_prefix=index_prefix_path,
@@ -111,21 +100,15 @@ class StaticDiskIndex:
         self, query: VectorLike, k_neighbors: int, complexity: int, beam_width: int = 2
     ) -> QueryResponse:
         """
-        Searches the index by a single query vector.
+        對單一查詢向量執行搜尋。
 
-        ### Parameters
-        - **query**: 1d numpy array of the same dimensionality and dtype of the index.
-        - **k_neighbors**: Number of neighbors to be returned. If query vector exists in index, it almost definitely
-          will be returned as well, so adjust your ``k_neighbors`` as appropriate. Must be > 0.
-        - **complexity**: Size of distance ordered list of candidate neighbors to use while searching. List size
-          increases accuracy at the cost of latency. Must be at least k_neighbors in size.
-        - **beam_width**: The beamwidth to be used for search. This is the maximum number of IO requests each query
-          will issue per iteration of search code. Larger beamwidth will result in fewer IO round-trips per query,
-          but might result in slightly higher total number of IO requests to SSD per query. For the highest query
-          throughput with a fixed SSD IOps rating, use W=1. For best latency, use W=4,8 or higher complexity search.
-          Specifying 0 will optimize the beamwidth depending on the number of threads performing search, but will
-          involve some tuning overhead.
+        ### 參數
+        - **query**: 一維 NumPy 陣列。
+        - **k_neighbors**: 要返回的鄰居數量。
+        - **complexity**: 搜尋候選集大小 (L)。
+        - **beam_width**: 光束寬度，控制每次迭代發出的 I/O 請求數量，是 SSD 索引的關鍵效能參數。
         """
+        # --- 搜尋前的參數驗證 ---
         _query = _castable_dtype_or_raise(query, expected=self._vector_dtype)
         _assert(len(_query.shape) == 1, "query vector must be 1-d")
         _assert_is_positive_uint32(k_neighbors, "k_neighbors")
@@ -138,6 +121,7 @@ class StaticDiskIndex:
             )
             complexity = k_neighbors
 
+        # --- 呼叫底層 C++ 搜尋函式 ---
         neighbors, distances = self._index.search(
             query=_query,
             knn=k_neighbors,
@@ -155,25 +139,9 @@ class StaticDiskIndex:
         beam_width: int = 2,
     ) -> QueryResponseBatch:
         """
-        Searches the index by a batch of query vectors.
-
-        This search is parallelized and far more efficient than searching for each vector individually.
-
-        ### Parameters
-        - **queries**: 2d numpy array, with column dimensionality matching the index and row dimensionality being the
-          number of queries intended to search for in parallel. Dtype must match dtype of the index.
-        - **k_neighbors**: Number of neighbors to be returned. If query vector exists in index, it almost definitely
-          will be returned as well, so adjust your ``k_neighbors`` as appropriate. Must be > 0.
-        - **complexity**: Size of distance ordered list of candidate neighbors to use while searching. List size
-          increases accuracy at the cost of latency. Must be at least k_neighbors in size.
-        - **num_threads**: Number of threads to use when searching this index. (>= 0), 0 = num_threads in system
-        - **beam_width**: The beamwidth to be used for search. This is the maximum number of IO requests each query
-          will issue per iteration of search code. Larger beamwidth will result in fewer IO round-trips per query,
-          but might result in slightly higher total number of IO requests to SSD per query. For the highest query
-          throughput with a fixed SSD IOps rating, use W=1. For best latency, use W=4,8 or higher complexity search.
-          Specifying 0 will optimize the beamwidth depending on the number of threads performing search, but will
-          involve some tuning overhead.
+        對一批查詢向量執行平行的批次搜尋。
         """
+        # --- 批次搜尋前的參數驗證 ---
         _queries = _castable_dtype_or_raise(queries, expected=self._vector_dtype)
         _assert_2d(_queries, "queries")
         _assert_is_positive_uint32(k_neighbors, "k_neighbors")

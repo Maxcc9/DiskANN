@@ -4,99 +4,63 @@
 """
 # Documentation Overview
 `diskannpy` is mostly structured around 2 distinct processes: [Index Builder Functions](#index-builders) and [Search Classes](#search-classes)
-
-It also includes a few nascent [utilities](#utilities).
-
-And lastly, it makes substantial use of type hints, with various shorthand [type aliases](#parameter-and-response-type-aliases) documented. 
-When reading the `diskannpy` code we refer to the type aliases, though `pdoc` helpfully expands them.
-
-## Index Builders
-- `build_disk_index` - To build an index that cannot fully fit into memory when searching
-- `build_memory_index` - To build an index that can fully fit into memory when searching
-
-## Search Classes
-- `StaticMemoryIndex` - for indices that can fully fit in memory and won't be changed during the search operations
-- `StaticDiskIndex` - for indices that cannot fully fit in memory, thus relying on disk IO to search, and also won't be changed during search operations
-- `DynamicMemoryIndex` - for indices that can fully fit in memory and will be mutated via insert/deletion operations as well as search operations
-
-## Parameter Defaults
-- `diskannpy.defaults` - Default values exported from the C++ extension for Python users
-
-## Parameter and Response Type Aliases
-- `DistanceMetric` - What distance metrics does `diskannpy` support?
-- `VectorDType` - What vector datatypes does `diskannpy` support?
-- `QueryResponse` - What can I expect as a response to my search?
-- `QueryResponseBatch` - What can I expect as a response to my batch search?
-- `VectorIdentifier` - What types do `diskannpy` support as vector identifiers?
-- `VectorIdentifierBatch` - A batch of identifiers of the exact same type. The type can change, but they must **all** change.
-- `VectorLike` - How does a vector look to `diskannpy`, to be inserted or searched with.
-- `VectorLikeBatch` - A batch of those vectors, to be inserted or searched with.
-- `Metadata` - DiskANN vector binary file metadata (num_points, vector_dim)
-
-## Utilities
-- `vectors_to_file` - Turns a 2 dimensional `numpy.typing.NDArray[VectorDType]` with shape `(number_of_points, vector_dim)` into a DiskANN vector bin file.
-- `vectors_from_file` - Reads a DiskANN vector bin file representing stored vectors into a numpy ndarray.
-- `vectors_metadata_from_file` - Reads metadata stored in a DiskANN vector bin file without reading the entire file
-- `tags_to_file` - Turns a 1 dimensional `numpy.typing.NDArray[VectorIdentifier]` into a DiskANN tags bin file.
-- `tags_from_file` - Reads a DiskANN tags bin file representing stored tags into a numpy ndarray.
-- `valid_dtype` - Checks if a given vector dtype is supported by `diskannpy`
+...
 """
+
+# 本檔案是 `diskann` Python 套件的主進入點。
+# 它定義了套件的公開 API，透過從內部模組匯入特定的類別和函式，
+# 並使用 `__all__` 來控制哪些名稱是公開的。
 
 from typing import Any, Literal, NamedTuple, Type, Union
 
 import numpy as np
 from numpy import typing as npt
 
-DistanceMetric = Literal["l2", "mips", "cosine"]
-""" Type alias for one of {"l2", "mips", "cosine"} """
-VectorDType = Union[Type[np.float32], Type[np.int8], Type[np.uint8]]
-""" Type alias for one of {`numpy.float32`, `numpy.int8`, `numpy.uint8`} """
-VectorLike = npt.NDArray[VectorDType]
-""" Type alias for something that can be treated as a vector """
-VectorLikeBatch = npt.NDArray[VectorDType]
-""" Type alias for a batch of VectorLikes """
-VectorIdentifier = np.uint32
-""" 
-Type alias for a vector identifier, whether it be an implicit array index identifier from StaticMemoryIndex or 
-StaticDiskIndex, or an explicit tag identifier from DynamicMemoryIndex 
-"""
-VectorIdentifierBatch = npt.NDArray[np.uint32]
-""" Type alias for a batch of VectorIdentifiers """
+# --- 型別別名定義 ---
+# 為了提高程式碼可讀性和靜態型別檢查的準確性，這裡定義了一系列的型別別名。
 
+DistanceMetric = Literal["l2", "mips", "cosine"]
+""" 距離度量的型別別名，可為 {"l2", "mips", "cosine"} 中的一種 """
+VectorDType = Union[Type[np.float32], Type[np.int8], Type[np.uint8]]
+""" 向量資料型別的型別別名，可為 {`numpy.float32`, `numpy.int8`, `numpy.uint8`} 中的一種 """
+VectorLike = npt.NDArray[VectorDType]
+""" 可被視為向量的型別別名 (即一個 NumPy 陣列) """
+VectorLikeBatch = npt.NDArray[VectorDType]
+""" 一批向量的型別別名 """
+VectorIdentifier = np.uint32
+""" 向量識別碼的型別別名，通常是 uint32 整數 """
+VectorIdentifierBatch = npt.NDArray[np.uint32]
+""" 一批向量識別碼的型別別名 """
+
+
+# --- 標準化的搜尋回應型別 ---
+# 使用 NamedTuple 可以讓搜尋結果更具可讀性，而不僅僅是一個原始的元組。
 
 class QueryResponse(NamedTuple):
     """
-    Tuple with two values, identifiers and distances. Both are 1d arrays, positionally correspond, and will contain the
-    nearest neighbors from [0..k_neighbors)
+    單一查詢的回應，包含兩個一維陣列：識別碼和距離。
     """
 
     identifiers: npt.NDArray[VectorIdentifier]
-    """ A `numpy.typing.NDArray[VectorIdentifier]` array of vector identifiers, 1 dimensional """
+    """ 向量識別碼的一維 NumPy 陣列 """
     distances: npt.NDArray[np.float32]
-    """
-    A `numpy.typing.NDAarray[numpy.float32]` of distances as calculated by the distance metric function,  1 dimensional
-    """
+    """ 對應的距離值的一維 NumPy 陣列 """
 
 
 class QueryResponseBatch(NamedTuple):
     """
-    Tuple with two values, identifiers and distances. Both are 2d arrays, with dimensionality determined by the
-    rows corresponding to the number of queries made, and the columns corresponding to the k neighbors
-    requested. The two 2d arrays have an implicit, position-based relationship
+    批次查詢的回應，包含兩個二維陣列：識別碼和距離。
     """
 
     identifiers: npt.NDArray[VectorIdentifier]
-    """ 
-    A `numpy.typing.NDArray[VectorIdentifier]` array of vector identifiers, 2 dimensional. The row corresponds to index 
-    of the query, and the column corresponds to the k neighbors requested 
-    """
+    """ 向量識別碼的二維 NumPy 陣列，(查詢數量, k) """
     distances: np.ndarray[np.float32]
-    """  
-    A `numpy.typing.NDAarray[numpy.float32]` of distances as calculated by the distance metric function, 2 dimensional. 
-    The row corresponds to the index of the query, and the column corresponds to the distance of the query to the 
-    *k-th* neighbor 
-    """
+    """ 對應的距離值的二維 NumPy 陣列，(查詢數量, k) """
 
+
+# --- 從內部模組匯入，以建立公開 API ---
+# 這是一個常見的 Python 模式，將實作細節放在底線開頭的內部模組中，
+# 然後在 __init__.py 中匯入並公開一個乾淨的 API。
 
 from . import defaults
 from ._builder import build_disk_index, build_memory_index
@@ -113,6 +77,8 @@ from ._files import (
 from ._static_disk_index import StaticDiskIndex
 from ._static_memory_index import StaticMemoryIndex
 
+# `__all__` 列表明確定義了當使用者執行 `from diskann import *` 時，
+# 哪些名稱會被匯入。這有助於避免汙染使用者的命名空間。
 __all__ = [
     "build_disk_index",
     "build_memory_index",

@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+// 本檔案包含了資料分割 (partitioning) 和 k-means 叢集演算法的實作。
+// 這些功能主要用於索引建立的離線階段，特別是為了產生 PQ 碼本 (pivots) 而對資料進行的預處理。
+
 #include <cmath>
 #include <cstdio>
 #include <iostream>
@@ -25,11 +28,10 @@
 #include <xmmintrin.h>
 #endif
 
-// block size for reading/ processing large files and matrices in blocks
+// 處理大型檔案和矩陣時的分塊大小
 #define BLOCK_SIZE 5000000
 
-// #define SAVE_INFLATED_PQ true
-
+// 從一個大型資料檔案中，以指定的採樣率隨機抽樣一部分資料，並存成新的資料檔和 ID 檔。
 template <typename T>
 void gen_random_slice(const std::string base_file, const std::string output_prefix, double sampling_rate)
 {
@@ -38,9 +40,9 @@ void gen_random_slice(const std::string base_file, const std::string output_pref
     std::ofstream sample_writer(std::string(output_prefix + "_data.bin").c_str(), std::ios::binary);
     std::ofstream sample_id_writer(std::string(output_prefix + "_ids.bin").c_str(), std::ios::binary);
 
-    std::random_device rd; // Will be used to obtain a seed for the random number engine
+    std::random_device rd;
     auto x = rd();
-    std::mt19937 generator(x); // Standard mersenne_twister_engine seeded with rd()
+    std::mt19937 generator(x);
     std::uniform_real_distribution<float> distribution(0, 1);
 
     size_t npts, nd;
@@ -65,6 +67,7 @@ void gen_random_slice(const std::string base_file, const std::string output_pref
     {
         base_reader.read((char *)cur_row.get(), sizeof(T) * nd);
         float sample = distribution(generator);
+        // 如果隨機數小於採樣率，則選中該點
         if (sample < sampling_rate)
         {
             sample_writer.write((char *)cur_row.get(), sizeof(T) * nd);
@@ -83,14 +86,7 @@ void gen_random_slice(const std::string base_file, const std::string output_pref
                   << std::endl;
 }
 
-// streams data from the file, and samples each vector with probability p_val
-// and returns a matrix of size slice_size* ndims as floating point type.
-// the slice_size and ndims are set inside the function.
-
-/***********************************
- * Reimplement using gen_random_slice(const T* inputdata,...)
- ************************************/
-
+// 從資料檔案中隨機抽樣，並將結果載入到記憶體中的 `sampled_data` 浮點數緩衝區。
 template <typename T>
 void gen_random_slice(const std::string data_file, double p_val, float *&sampled_data, size_t &slice_size,
                       size_t &ndims)
@@ -141,8 +137,7 @@ void gen_random_slice(const std::string data_file, double p_val, float *&sampled
     }
 }
 
-// same as above, but samples from the matrix inputdata instead of a file of
-// npts*ndims to return sampled_data of size slice_size*ndims.
+// 從一個已在記憶體中的資料陣列 `inputdata` 中隨機抽樣。
 template <typename T>
 void gen_random_slice(const T *inputdata, size_t npts, size_t ndims, double p_val, float *&sampled_data,
                       size_t &slice_size)
@@ -198,6 +193,7 @@ int estimate_cluster_sizes(float *test_data_float, size_t num_test, float *pivot
 
     size_t num_blocks = DIV_ROUND_UP(num_test, block_size);
 
+    // 分塊處理測試資料
     for (size_t block = 0; block < num_blocks; block++)
     {
         size_t start_id = block * block_size;
@@ -209,6 +205,7 @@ int estimate_cluster_sizes(float *test_data_float, size_t num_test, float *pivot
         math_utils::compute_closest_centers(block_data_float, cur_blk_size, test_dim, pivots, num_centers, k_base,
                                             block_closest_centers);
 
+        // 累計每個中心的計數
         for (size_t p = 0; p < cur_blk_size; p++)
         {
             for (size_t p1 = 0; p1 < k_base; p1++)
@@ -232,6 +229,8 @@ int estimate_cluster_sizes(float *test_data_float, size_t num_test, float *pivot
     return 0;
 }
 
+// 將完整的資料集根據給定的中心點 (pivots) 分割成多個叢集 (分區)。
+// 對於每個中心點，會產生一個新的二進位資料檔案和一個 ID 對應檔案。
 template <typename T>
 int shard_data_into_clusters(const std::string data_file, float *pivots, const size_t num_centers, const size_t dim,
                              const size_t k_base, std::string prefix_path)
@@ -289,13 +288,16 @@ int shard_data_into_clusters(const std::string data_file, float *pivots, const s
         math_utils::compute_closest_centers(block_data_float.get(), cur_blk_size, dim, pivots, num_centers, k_base,
                                             block_closest_centers.get());
 
+        // 將點分配到對應的分區檔案中
         for (size_t p = 0; p < cur_blk_size; p++)
         {
             for (size_t p1 = 0; p1 < k_base; p1++)
             {
                 size_t shard_id = block_closest_centers[p * k_base + p1];
                 uint32_t original_point_map_id = (uint32_t)(start_id + p);
+                // 將向量資料寫入分區資料檔
                 shard_data_writer[shard_id].write((char *)(block_data_T.get() + p * dim), sizeof(T) * dim);
+                // 將原始 ID 寫入分區 ID 對應檔
                 shard_idmap_writer[shard_id].write((char *)&original_point_map_id, sizeof(uint32_t));
                 shard_counts[shard_id]++;
             }
@@ -322,8 +324,8 @@ int shard_data_into_clusters(const std::string data_file, float *pivots, const s
     return 0;
 }
 
-// useful for partitioning large dataset. we first generate only the IDS for
-// each shard, and retrieve the actual vectors on demand.
+// 功能與 `shard_data_into_clusters` 類似，但不寫入實際的向量資料，
+// 而是為每個叢集產生一個只包含資料點 ID 的檔案。這在處理超大規模資料集時更節省空間。
 template <typename T>
 int shard_data_into_clusters_only_ids(const std::string data_file, float *pivots, const size_t num_centers,
                                       const size_t dim, const size_t k_base, std::string prefix_path)
@@ -406,6 +408,9 @@ int shard_data_into_clusters_only_ids(const std::string data_file, float *pivots
     return 0;
 }
 
+// 給定一個包含資料點 ID 的檔案和原始的完整資料檔案，
+// 產生一個新的資料檔案，其中只包含那些 ID 對應的向量資料。
+// 這是 `shard_data_into_clusters_only_ids` 的後續步驟。
 template <typename T>
 int retrieve_shard_data_from_ids(const std::string data_file, std::string idmap_filename, std::string data_filename)
 {
@@ -472,12 +477,8 @@ int retrieve_shard_data_from_ids(const std::string data_file, std::string idmap_
     return 0;
 }
 
-// partitions a large base file into many shards using k-means hueristic
-// on a random sample generated using sampling_rate probability. After this, it
-// assignes each base point to the closest k_base nearest centers and creates
-// the shards.
-// The total number of points across all shards will be k_base * num_points.
-
+// 執行資料分割的主函式。
+// 它協調整個流程：採樣 -> k-means -> 分割資料。
 template <typename T>
 int partition(const std::string data_file, const float sampling_rate, size_t num_parts, size_t max_k_means_reps,
               const std::string prefix_path, size_t k_base)
@@ -485,7 +486,8 @@ int partition(const std::string data_file, const float sampling_rate, size_t num
     size_t train_dim;
     size_t num_train;
     float *train_data_float;
-
+    
+    // 步驟 1: 從原始資料中隨機抽樣一部分作為 k-means 的訓練資料
     gen_random_slice<T>(data_file, sampling_rate, train_data_float, num_train, train_dim);
 
     float *pivot_data;
@@ -501,24 +503,27 @@ int partition(const std::string data_file, const float sampling_rate, size_t num
 
     pivot_data = new float[num_parts * train_dim];
 
-    // Process Global k-means for kmeans_partitioning Step
-    diskann::cout << "Processing global k-means (kmeans_partitioning Step)" << std::endl;
+    // 步驟 2: 執行 k-means 演算法
+    diskann::cout << "執行全域 k-means..." << std::endl;
+    // 步驟 2a: 使用 k-means++ 演算法選擇初始的中心點 (pivots)
     kmeans::kmeanspp_selecting_pivots(train_data_float, num_train, train_dim, pivot_data, num_parts);
 
+    // 步驟 2b: 執行 Lloyd's 演算法進行迭代，優化中心點位置
     kmeans::run_lloyds(train_data_float, num_train, train_dim, pivot_data, num_parts, max_k_means_reps, NULL, NULL);
 
-    diskann::cout << "Saving global k-center pivots" << std::endl;
+    diskann::cout << "儲存全域 k-means 中心點..." << std::endl;
     diskann::save_bin<float>(output_file.c_str(), pivot_data, (size_t)num_parts, train_dim);
 
-    // now pivots are ready. need to stream base points and assign them to
-    // closest clusters.
-
+    // 步驟 3: 使用訓練好的中心點，將完整的資料集分割成多個分區
     shard_data_into_clusters<T>(data_file, pivot_data, num_parts, train_dim, k_base, prefix_path);
+    
     delete[] pivot_data;
     delete[] train_data_float;
     return 0;
 }
 
+// 根據給定的記憶體預算來執行資料分割。
+// 這個函式會自動增加分區數量，直到估算的單個分區最大記憶體使用量小於預算為止。
 template <typename T>
 int partition_with_ram_budget(const std::string data_file, const double sampling_rate, double ram_budget,
                               size_t graph_degree, const std::string prefix_path, size_t k_base)
@@ -533,6 +538,7 @@ int partition_with_ram_budget(const std::string data_file, const double sampling
 
     bool fit_in_ram = false;
 
+    // 抽樣一部分資料用於訓練和測試
     gen_random_slice<T>(data_file, sampling_rate, train_data_float, num_train, train_dim);
 
     size_t test_dim;
@@ -554,11 +560,11 @@ int partition_with_ram_budget(const std::string data_file, const double sampling
     while (!fit_in_ram)
     {
         fit_in_ram = true;
-
         double max_ram_usage = 0;
         if (pivot_data != nullptr)
             delete[] pivot_data;
 
+        // 執行 k-means 找到中心點
         pivot_data = new float[num_parts * train_dim];
         // Process Global k-means for kmeans_partitioning Step
         diskann::cout << "Processing global k-means (kmeans_partitioning Step)" << std::endl;
@@ -566,17 +572,14 @@ int partition_with_ram_budget(const std::string data_file, const double sampling
 
         kmeans::run_lloyds(train_data_float, num_train, train_dim, pivot_data, num_parts, max_k_means_reps, NULL, NULL);
 
-        // now pivots are ready. need to stream base points and assign them to
-        // closest clusters.
-
+        // 估算每個分區的大小
         std::vector<size_t> cluster_sizes;
         estimate_cluster_sizes(test_data_float, num_test, pivot_data, num_parts, train_dim, k_base, cluster_sizes);
 
+        // 檢查最大的分區是否會超出記憶體預算
         for (auto &p : cluster_sizes)
         {
-            // to account for the fact that p is the size of the shard over the
-            // testing sample.
-            p = (uint64_t)(p / sampling_rate);
+            p = (uint64_t)(p / sampling_rate); // 根據採樣率還原估計的實際大小
             double cur_shard_ram_estimate =
                 diskann::estimate_ram_usage(p, (uint32_t)train_dim, sizeof(T), (uint32_t)graph_degree);
 

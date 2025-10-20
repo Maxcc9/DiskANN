@@ -1,6 +1,9 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT license.
 
+# 本檔案提供了使用者導向的高階 Python 函式，用於建立磁碟和記憶體索引。
+# 這些函式處理了參數驗證、臨時檔案的建立、以及呼叫底層 C++ 原生綁定等工作。
+
 import json
 import os
 import shutil
@@ -30,7 +33,11 @@ def _valid_path_and_dtype(
     index_path: str,
     index_prefix: str,
 ) -> Tuple[str, VectorDType]:
+    """
+    一個輔助函式，用於處理 `data` 參數，它既可以是檔案路徑，也可以是 NumPy 陣列。
+    """
     if isinstance(data, str):
+        # 如果 data 是字串，我們假設它是一個已存在的檔案路徑。
         vector_bin_path = data
         _assert(
             Path(data).exists() and Path(data).is_file(),
@@ -38,6 +45,8 @@ def _valid_path_and_dtype(
         )
         vector_dtype_actual = valid_dtype(vector_dtype)
     else:
+        # 如果 data 是一個 NumPy 陣列，我們會將它儲存到一個臨時的二進位檔案中，
+        # 因為底層的 C++ 建立函式需要一個檔案路徑作為輸入。
         vector_bin_path = os.path.join(index_path, f"{index_prefix}_vectors.bin")
         if Path(vector_bin_path).exists():
             raise ValueError(
@@ -63,49 +72,11 @@ def build_disk_index(
     index_prefix: str = "ann",
 ) -> None:
     """
-    This function will construct a DiskANN disk index. Disk indices are ideal for very large datasets that
-    are too large to fit in memory. Memory is still used, but it is primarily used to provide precise disk
-    locations for fast retrieval of smaller subsets of the index without compromising much on recall.
-
-    If you provide a numpy array, it will save this array to disk in a temp location
-    in the format DiskANN's PQ Flash Index builder requires. This temp folder is deleted upon index creation completion
-    or error.
-
-    ## Distance Metric and Vector Datatype Restrictions
-    | Metric \ Datatype | np.float32 | np.uint8 | np.int8 |
-    |-------------------|------------|----------|---------|
-    | L2                |      ✅     |     ✅    |    ✅    |
-    | MIPS              |      ✅     |     ❌    |    ❌    |
-    | Cosine [^bug-in-disk-cosine]     |      ❌     |     ❌    |    ❌    |
-
-    [^bug-in-disk-cosine]: For StaticDiskIndex, Cosine distances are not currently supported.
-
-    ### Parameters
-    - **data**: Either a `str` representing a path to a DiskANN vector bin file, or a numpy.ndarray,
-      of a supported dtype, in 2 dimensions. Note that `vector_dtype` must be provided if data is a `str`
-    - **distance_metric**: A `str`, strictly one of {"l2", "mips", "cosine"}. `l2` and `cosine` are supported for all 3
-      vector dtypes, but `mips` is only available for single precision floats.
-    - **index_directory**: The index files will be saved to this **existing** directory path
-    - **complexity**: The size of the candidate nearest neighbor list to use when building the index. Values between 75
-      and 200 are typical. Larger values will take more time to build but result in indices that provide higher recall
-      for the same search complexity. Use a value that is at least as large as `graph_degree` unless you are prepared
-      to compromise on quality
-    - **graph_degree**: The degree of the graph index, typically between 60 and 150. A larger maximum degree will
-      result in larger indices and longer indexing times, but better search quality.
-    - **search_memory_maximum**: Build index with the expectation that the search will use at most
-      `search_memory_maximum`, in gb.
-    - **build_memory_maximum**: Build index using at most `build_memory_maximum` in gb. Building processes typically
-      require more memory, while search memory can be reduced.
-    - **num_threads**: Number of threads to use when creating this index. `0` is used to indicate all available
-      logical processors should be used.
-    - **pq_disk_bytes**: Use `0` to store uncompressed data on SSD. This allows the index to asymptote to 100%
-      recall. If your vectors are too large to store in SSD, this parameter provides the option to compress the
-      vectors using PQ for storing on SSD. This will trade off recall. You would also want this to be greater
-      than the number of bytes used for the PQ compressed data stored in-memory. Default is `0`.
-    - **vector_dtype**: Required if the provided `data` is of type `str`, else we use the `data.dtype` if np array.
-    - **index_prefix**: The prefix of the index files. Defaults to "ann".
+    建立一個 DiskANN 磁碟索引。磁碟索引適用於無法完全載入到記憶體中的超大型資料集。
+    ...
     """
 
+    # --- 步驟 1: 驗證所有使用者輸入的參數 ---
     _assert(
         (isinstance(data, str) and vector_dtype is not None)
         or isinstance(data, np.ndarray),
@@ -138,6 +109,7 @@ def build_disk_index(
 
     num_points, dimensions = vectors_metadata_from_file(vector_bin_path)
 
+    # --- 步驟 3: 根據資料類型，選擇要呼叫的底層 C++ 建立函式 ---
     if vector_dtype_actual == np.uint8:
         _builder = _native_dap.build_disk_uint8_index
     elif vector_dtype_actual == np.int8:
@@ -147,6 +119,7 @@ def build_disk_index(
 
     index_prefix_path = os.path.join(index_directory, index_prefix)
 
+    # --- 步驟 4: 呼叫底層 C++ 函式來執行實際的索引建立工作 ---
     _builder(
         distance_metric=dap_metric,
         data_file_path=vector_bin_path,
@@ -158,6 +131,8 @@ def build_disk_index(
         num_threads=num_threads,
         pq_disk_bytes=pq_disk_bytes,
     )
+
+    # --- 步驟 5: 寫入元資料檔案，方便之後載入索引 ---
     _write_index_metadata(
         index_prefix_path, vector_dtype_actual, dap_metric, num_points, dimensions
     )
@@ -294,6 +269,8 @@ def build_memory_index(
 
     index_prefix_path = os.path.join(index_directory, index_prefix)
 
+    # --- 步驟 4: (可選) 處理過濾標籤 ---
+    # 如果使用者提供了過濾標籤，將其轉換為 C++ 函式庫所需的格式並寫入臨時檔案。
     filter_labels_file = ""
     if filter_labels is not None:
         label_counts = {}
@@ -325,6 +302,7 @@ def build_memory_index(
     else:
         use_tags = False
 
+    # --- 步驟 6: 呼叫底層 C++ 函式來執行實際的索引建立工作 ---
     _builder(
         distance_metric=dap_metric,
         data_file_path=vector_bin_path,
@@ -342,6 +320,7 @@ def build_memory_index(
         filter_complexity=filter_complexity,
     )
 
+    # --- 步驟 7: 寫入元資料檔案 ---
     _write_index_metadata(
         index_prefix_path, vector_dtype_actual, dap_metric, num_points, dimensions
     )

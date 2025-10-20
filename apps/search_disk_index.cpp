@@ -179,7 +179,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     std::string recall_string = "Recall@" + std::to_string(recall_at);
     diskann::cout << std::setw(6) << "L" << std::setw(12) << "Beamwidth" << std::setw(16) << "QPS" << std::setw(16)
                   << "Mean Latency" << std::setw(16) << "99.9 Latency" << std::setw(16) << "Mean IOs" << std::setw(16)
-                  << "Mean IO (us)" << std::setw(16) << "CPU (s)";
+                  << "Mean IO (us)" << std::setw(16) << "CPU (us)" << std::setw(16) << "Mean Cache Hits" << std::setw(16) << "Mean Read (bytes)";
     if (calc_recall_flag)
     {
         diskann::cout << std::setw(16) << recall_string << std::endl;
@@ -273,6 +273,12 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         auto mean_io_us = diskann::get_mean_stats<float>(stats, query_num,
                                                          [](const diskann::QueryStats &stats) { return stats.io_us; });
 
+        auto mean_cache_hits = diskann::get_mean_stats<uint32_t>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.n_cache_hits; });
+
+        auto mean_read_size = diskann::get_mean_stats<uint32_t>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.read_size; });
+
         double recall = 0;
         if (calc_recall_flag)
         {
@@ -283,7 +289,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 
         diskann::cout << std::setw(6) << L << std::setw(12) << optimized_beamwidth << std::setw(16) << qps
                       << std::setw(16) << mean_latency << std::setw(16) << latency_999 << std::setw(16) << mean_ios
-                      << std::setw(16) << mean_io_us << std::setw(16) << mean_cpuus;
+                      << std::setw(16) << mean_io_us << std::setw(16) << mean_cpuus << std::setw(16) << mean_cache_hits
+                      << std::setw(16) << mean_read_size;
         if (calc_recall_flag)
         {
             diskann::cout << std::setw(16) << recall << std::endl;

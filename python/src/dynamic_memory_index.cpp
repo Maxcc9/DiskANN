@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+// 本檔案實作了 `DynamicMemoryIndex` 類別的 Python 封裝。
+// 這個類別的核心是 `diskann::Index`，但其設定為可動態新增和刪除資料點。
+
 #include "parameters.h"
 #include "dynamic_memory_index.h"
 
@@ -9,6 +12,7 @@
 namespace diskannpy
 {
 
+// 輔助函式，用於從 Python 參數建立 C++ 的 `IndexWriteParameters` 物件。
 diskann::IndexWriteParameters dynamic_index_write_parameters(const uint32_t complexity, const uint32_t graph_degree,
                                                              const bool saturate_graph,
                                                              const uint32_t max_occlusion_size, const float alpha,
@@ -24,6 +28,7 @@ diskann::IndexWriteParameters dynamic_index_write_parameters(const uint32_t comp
         .build();
 }
 
+// 輔助函式，用於建立一個為動態索引而設定的 `diskann::Index` 物件。
 template <class DT>
 diskann::Index<DT, DynamicIdType, filterT> dynamic_index_builder(
     const diskann::Metric m, const diskann::IndexWriteParameters &write_params, const size_t dimensions,
@@ -62,6 +67,7 @@ DynamicMemoryIndex<DT>::DynamicMemoryIndex(const diskann::Metric m, const size_t
 {
 }
 
+// 載入一個已儲存的索引
 template <class DT> void DynamicMemoryIndex<DT>::load(const std::string &index_path)
 {
     const std::string tags_file = index_path + ".tags";
@@ -72,13 +78,16 @@ template <class DT> void DynamicMemoryIndex<DT>::load(const std::string &index_p
     _index.load(index_path.c_str(), _write_parameters.num_threads, _initial_search_complexity);
 }
 
+// 插入單一向量
 template <class DT>
 int DynamicMemoryIndex<DT>::insert(const py::array_t<DT, py::array::c_style | py::array::forcecast> &vector,
                                    const DynamicIdType id)
 {
+    // 呼叫底層 C++ Index 的 insert_point 方法。
     return _index.insert_point(vector.data(), id);
 }
 
+// 批次插入多個向量
 template <class DT>
 py::array_t<int> DynamicMemoryIndex<DT>::batch_insert(
     py::array_t<DT, py::array::c_style | py::array::forcecast> &vectors,
@@ -100,11 +109,14 @@ py::array_t<int> DynamicMemoryIndex<DT>::batch_insert(
     return insert_retvals;
 }
 
+// 標記一個點為已刪除 (延遲刪除)
+// 這只是一個標記，實際的資料和圖結構調整會在 `consolidate_delete` 中進行。
 template <class DT> int DynamicMemoryIndex<DT>::mark_deleted(const DynamicIdType id)
 {
     return this->_index.lazy_delete(id);
 }
 
+// 儲存索引的目前狀態
 template <class DT> void DynamicMemoryIndex<DT>::save(const std::string &save_path, const bool compact_before_save)
 {
     if (save_path.empty())
@@ -114,6 +126,7 @@ template <class DT> void DynamicMemoryIndex<DT>::save(const std::string &save_pa
     _index.save(save_path.c_str(), compact_before_save);
 }
 
+// 單一查詢搜尋
 template <class DT>
 NeighborsAndDistances<DynamicIdType> DynamicMemoryIndex<DT>::search(
     py::array_t<DT, py::array::c_style | py::array::forcecast> &query, const uint64_t knn, const uint64_t complexity)
@@ -125,6 +138,7 @@ NeighborsAndDistances<DynamicIdType> DynamicMemoryIndex<DT>::search(
     return std::make_pair(ids, dists);
 }
 
+// 批次搜尋
 template <class DT>
 NeighborsAndDistances<DynamicIdType> DynamicMemoryIndex<DT>::batch_search(
     py::array_t<DT, py::array::c_style | py::array::forcecast> &queries, const uint64_t num_queries, const uint64_t knn,
@@ -150,6 +164,8 @@ NeighborsAndDistances<DynamicIdType> DynamicMemoryIndex<DT>::batch_search(
     return std::make_pair(ids, dists);
 }
 
+// 整理刪除操作
+// 實際從圖中移除被標記為刪除的點，並修復圖結構。
 template <class DT> void DynamicMemoryIndex<DT>::consolidate_delete()
 {
     _index.consolidate_deletes(_write_parameters);
@@ -160,6 +176,7 @@ template <class DT> size_t DynamicMemoryIndex<DT>::num_points()
     return _index.get_num_points();
 }
 
+// 模板實例化
 template class DynamicMemoryIndex<float>;
 template class DynamicMemoryIndex<uint8_t>;
 template class DynamicMemoryIndex<int8_t>;

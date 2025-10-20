@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+// 本檔案實作了 k-means 叢集演算法和相關的數學輔助函式。
+
 #include <limits>
 #include <malloc.h>
 #include <math_utils.h>
@@ -11,6 +13,7 @@
 namespace math_utils
 {
 
+// 計算 L2 距離平方
 float calc_distance(float *vec_1, float *vec_2, size_t dim)
 {
     float dist = 0;
@@ -21,14 +24,14 @@ float calc_distance(float *vec_1, float *vec_2, size_t dim)
     return dist;
 }
 
-// compute l2-squared norms of data stored in row major num_points * dim,
-// needs
-// to be pre-allocated
+// 計算一組向量的 L2 範數平方
 void compute_vecs_l2sq(float *vecs_l2sq, float *data, const size_t num_points, const size_t dim)
 {
+    // 使用 OpenMP 平行處理
 #pragma omp parallel for schedule(static, 8192)
     for (int64_t n_iter = 0; n_iter < (int64_t)num_points; n_iter++)
     {
+        // 使用 MKL 的 cblas_snrm2 函式高效計算 L2 範數
         vecs_l2sq[n_iter] = cblas_snrm2((MKL_INT)dim, (data + (n_iter * dim)), 1);
         vecs_l2sq[n_iter] *= vecs_l2sq[n_iter];
     }
@@ -51,16 +54,9 @@ void rotate_data_randomly(float *data, size_t num_points, size_t dim, float *rot
     diskann::cout << "done." << std::endl;
 }
 
-// calculate k closest centers to data of num_points * dim (row major)
-// centers is num_centers * dim (row major)
-// data_l2sq has pre-computed squared norms of data
-// centers_l2sq has pre-computed squared norms of centers
-// pre-allocated center_index will contain id of nearest center
-// pre-allocated dist_matrix shound be num_points * num_centers and contain
-// squared distances
-// Default value of k is 1
+// ... (旋轉資料的函式)
 
-// Ideally used only by compute_closest_centers
+// k-means 分配步驟的核心：計算一個區塊內的點到所有中心點的距離
 void compute_closest_centers_in_block(const float *const data, const size_t num_points, const size_t dim,
                                       const float *const centers, const size_t num_centers,
                                       const float *const docs_l2sq, const float *const centers_l2sq,
@@ -87,12 +83,15 @@ void compute_closest_centers_in_block(const float *const data, const size_t num_
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, (MKL_INT)num_points, (MKL_INT)num_centers, (MKL_INT)1, 1.0f,
                 docs_l2sq, (MKL_INT)1, ones_a, (MKL_INT)1, 0.0f, dist_matrix, (MKL_INT)num_centers);
 
+    // 步驟 2: 計算所有 (點, 中心) 對的 ||y||^2 並加到結果中。
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, (MKL_INT)num_points, (MKL_INT)num_centers, (MKL_INT)1, 1.0f,
                 ones_b, (MKL_INT)1, centers_l2sq, (MKL_INT)1, 1.0f, dist_matrix, (MKL_INT)num_centers);
 
+    // 步驟 3: 計算 -2 * <x,y> 並加到結果中。這是最耗時的步驟，使用 MKL 的 cblas_sgemm (矩陣乘法) 進行了高度優化。
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, (MKL_INT)num_points, (MKL_INT)num_centers, (MKL_INT)dim, -2.0f,
                 data, (MKL_INT)dim, centers, (MKL_INT)dim, 1.0f, dist_matrix, (MKL_INT)num_centers);
 
+    // 步驟 4: 從計算出的距離矩陣中，為每個點找到最近的 k 個中心點。
     if (k == 1)
     {
 #pragma omp parallel for schedule(static, 8192)
@@ -127,23 +126,14 @@ void compute_closest_centers_in_block(const float *const data, const size_t num_
                 PivotContainer this_piv = top_k_queue.top();
                 center_index[i * k + j] = (uint32_t)this_piv.piv_id;
                 top_k_queue.pop();
-            }
         }
+    }
     }
     delete[] ones_a;
     delete[] ones_b;
 }
 
-// Given data in num_points * new_dim row major
-// Pivots stored in full_pivot_data as num_centers * new_dim row major
-// Calculate the k closest pivot for each point and store it in vector
-// closest_centers_ivf (row major, num_points*k) (which needs to be allocated
-// outside) Additionally, if inverted index is not null (and pre-allocated),
-// it
-// will return inverted index for each center, assuming each of the inverted
-// indices is an empty vector. Additionally, if pts_norms_squared is not null,
-// then it will assume that point norms are pre-computed and use those values
-
+// `compute_closest_centers_in_block` 的包裝函式，處理大規模資料。
 void compute_closest_centers(float *data, size_t num_points, size_t dim, float *pivot_data, size_t num_centers,
                              size_t k, uint32_t *closest_centers_ivf, std::vector<size_t> *inverted_index,
                              float *pts_norms_squared)
@@ -231,14 +221,7 @@ void process_residuals(float *data_load, size_t num_points, size_t dim, float *c
 namespace kmeans
 {
 
-// run Lloyds one iteration
-// Given data in row major num_points * dim, and centers in row major
-// num_centers * dim And squared lengths of data points, output the closest
-// center to each data point, update centers, and also return inverted index.
-// If
-// closest_centers == NULL, will allocate memory and return. Similarly, if
-// closest_docs == NULL, will allocate memory and return.
-
+// 執行一次 Lloyd's 演算法的迭代
 float lloyds_iter(float *data, size_t num_points, size_t dim, float *centers, size_t num_centers, float *docs_l2sq,
                   std::vector<size_t> *closest_docs, uint32_t *&closest_center)
 {
@@ -256,8 +239,9 @@ float lloyds_iter(float *data, size_t num_points, size_t dim, float *centers, si
     math_utils::compute_closest_centers(data, num_points, dim, centers, num_centers, 1, closest_center, closest_docs,
                                         docs_l2sq);
 
+    // 步驟 2: 更新步驟 (Update Step)
+    // 重新計算每個叢集的質心 (平均向量)。
     memset(centers, 0, sizeof(float) * (size_t)num_centers * (size_t)dim);
-
 #pragma omp parallel for schedule(static, 1)
     for (int64_t c = 0; c < (int64_t)num_centers; ++c)
     {
@@ -271,7 +255,7 @@ float lloyds_iter(float *data, size_t num_points, size_t dim, float *centers, si
             for (size_t j = 0; j < dim; j++)
             {
                 cluster_sum[j] += (double)current[j];
-            }
+        }
         }
         if (closest_docs[c].size() > 0)
         {
@@ -281,6 +265,7 @@ float lloyds_iter(float *data, size_t num_points, size_t dim, float *centers, si
         delete[] cluster_sum;
     }
 
+    // 步驟 3: 計算殘差 (所有點到其中心點的距離平方和)，用於監控收斂情況。
     float residual = 0.0;
     if (compute_residual)
     {
@@ -302,13 +287,7 @@ float lloyds_iter(float *data, size_t num_points, size_t dim, float *centers, si
     return residual;
 }
 
-// Run Lloyds until max_reps or stopping criterion
-// If you pass NULL for closest_docs and closest_center, it will NOT return
-// the
-// results, else it will assume appriate allocation as closest_docs = new
-// vector<size_t> [num_centers], and closest_center = new size_t[num_points]
-// Final centers are output in centers as row major num_centers * dim
-//
+// 執行完整的 Lloyd's k-means 演算法
 float run_lloyds(float *data, size_t num_points, size_t dim, float *centers, const size_t num_centers,
                  const size_t max_reps, std::vector<size_t> *closest_docs, uint32_t *closest_center)
 {
@@ -337,11 +316,12 @@ float run_lloyds(float *data, size_t num_points, size_t dim, float *centers, con
 
         residual = lloyds_iter(data, num_points, dim, centers, num_centers, docs_l2sq, closest_docs, closest_center);
 
+        // 檢查收斂條件：如果殘差變化很小，則提前終止
         if (((i != 0) && ((old_residual - residual) / residual) < 0.00001) ||
             (residual < std::numeric_limits<float>::epsilon()))
         {
-            diskann::cout << "Residuals unchanged: " << old_residual << " becomes " << residual
-                          << ". Early termination." << std::endl;
+            diskann::cout << "殘差無變化: " << old_residual << " -> " << residual
+                          << ". 提前終止。" << std::endl;
             break;
         }
     }
@@ -353,9 +333,7 @@ float run_lloyds(float *data, size_t num_points, size_t dim, float *centers, con
     return residual;
 }
 
-// assumes memory allocated for pivot_data as new
-// float[num_centers*dim]
-// and select randomly num_centers points as pivots
+// 隨機選擇 k 個點作為初始中心點
 void selecting_pivots(float *data, size_t num_points, size_t dim, float *pivot_data, size_t num_centers)
 {
     //	pivot_data = new float[num_centers * dim];
@@ -402,8 +380,8 @@ void kmeanspp_selecting_pivots(float *data, size_t num_points, size_t dim, float
     picked.push_back(init_id);
     std::memcpy(pivot_data, data + init_id * dim, dim * sizeof(float));
 
+    // 計算所有點到第一個中心點的距離
     float *dist = new float[num_points];
-
 #pragma omp parallel for schedule(static, 8192)
     for (int64_t i = 0; i < (int64_t)num_points; i++)
     {
@@ -426,8 +404,10 @@ void kmeanspp_selecting_pivots(float *data, size_t num_points, size_t dim, float
         if (sum == 0)
             sum_flag = true;
 
+        // 步驟 2b: 輪盤賭選擇 (Roulette Wheel Selection)
+        // 產生一個隨機數 dart_val，然後根據 dist[i] 的權重來選擇下一個中心點。
+        // dist[i] 越大 (即點 i 離現有中心點越遠)，被選中的機率越高。
         dart_val *= sum;
-
         double prefix_sum = 0;
         for (size_t i = 0; i < (num_points); i++)
         {
@@ -436,7 +416,6 @@ void kmeanspp_selecting_pivots(float *data, size_t num_points, size_t dim, float
             {
                 break;
             }
-
             prefix_sum += dist[i];
         }
 
@@ -445,6 +424,7 @@ void kmeanspp_selecting_pivots(float *data, size_t num_points, size_t dim, float
         picked.push_back(tmp_pivot);
         std::memcpy(pivot_data + num_picked * dim, data + tmp_pivot * dim, dim * sizeof(float));
 
+        // 步驟 2c: 更新所有點的 dist[i]，使其為到「最新的」中心點集合的最近距離
 #pragma omp parallel for schedule(static, 8192)
         for (int64_t i = 0; i < (int64_t)num_points; i++)
         {

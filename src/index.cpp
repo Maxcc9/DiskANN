@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+// 本檔案為 DiskANN 核心記憶體內圖索引 `Index` 類別的實作。
+// 包含了 Vamana 演算法的圖建立、搜尋、動態插入與刪除等核心邏輯。
+
 #include <omp.h>
 
 #include <type_traits>
@@ -23,12 +26,15 @@
 
 #include "index.h"
 
+// 當圖的總點數小於此值時，使用 bitset 來標記已訪問節點，以提高效率。
 #define MAX_POINTS_FOR_USING_BITSET 10000000
 
 namespace diskann
 {
-// Initialize an index with metric m, load the data of type T with filename
-// (bin), and initialize max_points
+
+// 索引類別的建構函式 (主要版本)
+// 這個建構函式接收一個 IndexConfig 物件，以及預先建立的資料儲存和圖儲存物件。
+// 用於批次建立索引或載入一個已存在的索引。
 template <typename T, typename TagT, typename LabelT>
 Index<T, TagT, LabelT>::Index(const IndexConfig &index_config, std::shared_ptr<AbstractDataStore<T>> data_store,
                               std::unique_ptr<AbstractGraphStore> graph_store,
@@ -42,35 +48,30 @@ Index<T, TagT, LabelT>::Index(const IndexConfig &index_config, std::shared_ptr<A
 {
     if (_dynamic_index && !_enable_tags)
     {
-        throw ANNException("ERROR: Dynamic Indexing must have tags enabled.", -1, __FUNCSIG__, __FILE__, __LINE__);
+        throw ANNException("錯誤: 動態索引必須啟用標籤功能。", -1, __FUNCSIG__, __FILE__, __LINE__);
     }
 
     if (_pq_dist)
     {
         if (_dynamic_index)
-            throw ANNException("ERROR: Dynamic Indexing not supported with PQ distance based "
-                               "index construction",
+            throw ANNException("錯誤: 動態索引不支援基於 PQ 距離的索引建立",
                                -1, __FUNCSIG__, __FILE__, __LINE__);
         if (_dist_metric == diskann::Metric::INNER_PRODUCT)
-            throw ANNException("ERROR: Inner product metrics not yet supported "
-                               "with PQ distance "
-                               "base index",
+            throw ANNException("錯誤: 基於 PQ 距離的索引尚不支援內積度量",
                                -1, __FUNCSIG__, __FILE__, __LINE__);
     }
 
     if (_dynamic_index && _num_frozen_pts == 0)
     {
-        _num_frozen_pts = 1;
+        _num_frozen_pts = 1; // 動態索引至少需要一個凍結點作為圖的進入點
     }
-    // Sanity check. While logically it is correct, max_points = 0 causes
-    // downstream problems.
     if (_max_points == 0)
     {
         _max_points = 1;
     }
     const size_t total_internal_points = _max_points + _num_frozen_pts;
 
-    _start = (uint32_t)_max_points;
+    _start = (uint32_t)_max_points; // 凍結點從 _max_points 的位置開始儲存
 
     _data_store = data_store;
     _pq_data_store = pq_data_store;
@@ -85,7 +86,7 @@ Index<T, TagT, LabelT>::Index(const IndexConfig &index_config, std::shared_ptr<A
 
     if (_dynamic_index)
     {
-        this->enable_delete(); // enable delete by default for dynamic index
+        this->enable_delete(); // 動態索引預設啟用刪除功能
         if (_filtered_index)
         {
             _location_to_labels.resize(total_internal_points);
@@ -94,16 +95,18 @@ Index<T, TagT, LabelT>::Index(const IndexConfig &index_config, std::shared_ptr<A
 
     if (index_config.index_write_params != nullptr)
     {
-        _indexingQueueSize = index_config.index_write_params->search_list_size;
-        _indexingRange = index_config.index_write_params->max_degree;
-        _indexingMaxC = index_config.index_write_params->max_occlusion_size;
-        _indexingAlpha = index_config.index_write_params->alpha;
+        // 設定索引建立時的參數
+        _indexingQueueSize = index_config.index_write_params->search_list_size; // L
+        _indexingRange = index_config.index_write_params->max_degree;         // R
+        _indexingMaxC = index_config.index_write_params->max_occlusion_size; // C
+        _indexingAlpha = index_config.index_write_params->alpha;             // Alpha
         _filterIndexingQueueSize = index_config.index_write_params->filter_list_size;
         _indexingThreads = index_config.index_write_params->num_threads;
         _saturate_graph = index_config.index_write_params->saturate_graph;
 
         if (index_config.index_search_params != nullptr)
         {
+            // 初始化查詢時所需的暫存空間
             uint32_t num_scratch_spaces = index_config.index_search_params->num_search_threads + _indexingThreads;
             initialize_query_scratch(num_scratch_spaces, index_config.index_search_params->initial_search_list_size,
                                      _indexingQueueSize, _indexingRange, _indexingMaxC, _data_store->get_dims());
@@ -111,6 +114,9 @@ Index<T, TagT, LabelT>::Index(const IndexConfig &index_config, std::shared_ptr<A
     }
 }
 
+// 索引類別的建構函式 (簡化版本)
+// 這個版本更為使用者友善，它會根據傳入的參數自動使用 IndexFactory 來建立內部的資料和圖儲存物件。
+// 主要用於增量索引 (可動態增刪資料點)。
 template <typename T, typename TagT, typename LabelT>
 Index<T, TagT, LabelT>::Index(Metric m, const size_t dim, const size_t max_points,
                               const std::shared_ptr<IndexWriteParameters> index_parameters,
@@ -156,9 +162,10 @@ Index<T, TagT, LabelT>::Index(Metric m, const size_t dim, const size_t max_point
     }
 }
 
+// 解構函式
 template <typename T, typename TagT, typename LabelT> Index<T, TagT, LabelT>::~Index()
 {
-    // Ensure that no other activity is happening before dtor()
+    // 確保在解構前沒有其他活動正在進行，鎖住所有相關的鎖
     std::unique_lock<std::shared_timed_mutex> ul(_update_lock);
     std::unique_lock<std::shared_timed_mutex> cl(_consolidate_lock);
     std::unique_lock<std::shared_timed_mutex> tl(_tag_lock);
@@ -181,6 +188,7 @@ template <typename T, typename TagT, typename LabelT> Index<T, TagT, LabelT>::~I
     }
 }
 
+// 初始化查詢時所需的暫存空間
 template <typename T, typename TagT, typename LabelT>
 void Index<T, TagT, LabelT>::initialize_query_scratch(uint32_t num_threads, uint32_t search_l, uint32_t indexing_l,
                                                       uint32_t r, uint32_t maxc, size_t dim)
@@ -193,11 +201,12 @@ void Index<T, TagT, LabelT>::initialize_query_scratch(uint32_t num_threads, uint
     }
 }
 
+// 儲存標籤到檔案
 template <typename T, typename TagT, typename LabelT> size_t Index<T, TagT, LabelT>::save_tags(std::string tags_file)
 {
     if (!_enable_tags)
     {
-        diskann::cout << "Not saving tags as they are not enabled." << std::endl;
+        diskann::cout << "不儲存標籤，因為標籤功能未啟用。" << std::endl;
         return 0;
     }
 
@@ -212,7 +221,6 @@ template <typename T, typename TagT, typename LabelT> size_t Index<T, TagT, Labe
         }
         else
         {
-            // catering to future when tagT can be any type.
             std::memset((char *)&tag_data[i], 0, sizeof(TagT));
         }
     }
@@ -232,22 +240,21 @@ template <typename T, typename TagT, typename LabelT> size_t Index<T, TagT, Labe
     return tag_bytes_written;
 }
 
+// 儲存資料點到檔案
 template <typename T, typename TagT, typename LabelT> size_t Index<T, TagT, LabelT>::save_data(std::string data_file)
 {
-    // Note: at this point, either _nd == _max_points or any frozen points have
-    // been temporarily moved to _nd, so _nd + _num_frozen_pts is the valid
-    // location limit.
+    // 注意：此時，凍結點可能已被暫時移動，所以 _nd + _num_frozen_pts 是有效的儲存上限。
     return _data_store->save(data_file, (location_t)(_nd + _num_frozen_pts));
 }
 
-// save the graph index on a file as an adjacency list. For each point,
-// first store the number of neighbors, and then the neighbor list (each as
-// 4 byte uint32_t)
+// 將圖索引以鄰接串列的形式儲存到檔案。
+// 對於每個點，首先儲存鄰居的數量，然後是鄰居列表。
 template <typename T, typename TagT, typename LabelT> size_t Index<T, TagT, LabelT>::save_graph(std::string graph_file)
 {
     return _graph_store->store(graph_file, _nd + _num_frozen_pts, _num_frozen_pts, _start);
 }
 
+// 儲存已刪除點的列表
 template <typename T, typename TagT, typename LabelT>
 size_t Index<T, TagT, LabelT>::save_delete_list(const std::string &filename)
 {
@@ -264,11 +271,13 @@ size_t Index<T, TagT, LabelT>::save_delete_list(const std::string &filename)
     return save_bin<uint32_t>(filename, delete_list.get(), _delete_set->size(), 1);
 }
 
+// 儲存整個索引 (包括圖、資料、標籤等)
 template <typename T, typename TagT, typename LabelT>
 void Index<T, TagT, LabelT>::save(const char *filename, bool compact_before_save)
 {
     diskann::Timer timer;
 
+    // 鎖住所有相關的鎖以確保儲存過程的執行緒安全
     std::unique_lock<std::shared_timed_mutex> ul(_update_lock);
     std::unique_lock<std::shared_timed_mutex> cl(_consolidate_lock);
     std::unique_lock<std::shared_timed_mutex> tl(_tag_lock);
@@ -276,6 +285,7 @@ void Index<T, TagT, LabelT>::save(const char *filename, bool compact_before_save
 
     if (compact_before_save)
     {
+        // 在儲存前進行資料壓縮，移除已刪除的節點，整理資料佈局
         compact_data();
         compact_frozen_point();
     }
@@ -283,7 +293,7 @@ void Index<T, TagT, LabelT>::save(const char *filename, bool compact_before_save
     {
         if (!_data_compacted)
         {
-            throw ANNException("Index save for non-compacted index is not yet implemented", -1, __FUNCSIG__, __FILE__,
+            throw ANNException("尚未實作未壓縮索引的儲存功能", -1, __FUNCSIG__, __FILE__,
                                __LINE__);
         }
     }
@@ -367,10 +377,7 @@ void Index<T, TagT, LabelT>::save(const char *filename, bool compact_before_save
         std::string data_file = std::string(filename) + ".data";
         std::string delete_list_file = std::string(filename) + ".del";
 
-        // Because the save_* functions use append mode, ensure that
-        // the files are deleted before save. Ideally, we should check
-        // the error code for delete_file, but will ignore now because
-        // delete should succeed if save will succeed.
+        // 因為 save_* 函式使用附加模式，所以在儲存前確保檔案被刪除。
         delete_file(graph_file);
         save_graph(graph_file);
         delete_file(data_file);
@@ -382,16 +389,14 @@ void Index<T, TagT, LabelT>::save(const char *filename, bool compact_before_save
     }
     else
     {
-        diskann::cout << "Save index in a single file currently not supported. "
-                         "Not saving the index."
+        diskann::cout << "目前不支援將索引儲存為單一檔案。"
                       << std::endl;
     }
 
-    // If frozen points were temporarily compacted to _nd, move back to
-    // _max_points.
+    // 如果凍結點被暫時壓縮到 _nd，則將其移回 _max_points。
     reposition_frozen_point_to_end();
 
-    diskann::cout << "Time taken for save: " << timer.elapsed() / 1000000.0 << "s." << std::endl;
+    diskann::cout << "儲存耗時: " << timer.elapsed() / 1000000.0 << "s." << std::endl;
 }
 
 #ifdef EXEC_ENV_OLS
@@ -525,8 +530,7 @@ size_t Index<T, TagT, LabelT>::load_delete_set(const std::string &filename)
     return npts;
 }
 
-// load the index from file and update the max_degree, cur (navigating
-// node loc), and _final_graph (adjacency list)
+// 從檔案載入索引，並更新 max_degree、起始點等資訊。
 template <typename T, typename TagT, typename LabelT>
 #ifdef EXEC_ENV_OLS
 void Index<T, TagT, LabelT>::load(AlignedFileReader &reader, uint32_t num_threads, uint32_t search_l)
@@ -696,6 +700,7 @@ size_t Index<T, TagT, LabelT>::load_graph(std::string filename, size_t expected_
     return std::get<0>(res);
 }
 
+// 根據標籤取得向量 (虛擬函式實作)
 template <typename T, typename TagT, typename LabelT>
 int Index<T, TagT, LabelT>::_get_vector_by_tag(TagType &tag, DataType &vec)
 {
@@ -720,7 +725,7 @@ template <typename T, typename TagT, typename LabelT> int Index<T, TagT, LabelT>
     std::shared_lock<std::shared_timed_mutex> lock(_tag_lock);
     if (_tag_to_location.find(tag) == _tag_to_location.end())
     {
-        diskann::cout << "Tag " << get_tag_string(tag) << " does not exist" << std::endl;
+        diskann::cout << "標籤 " << get_tag_string(tag) << " 不存在" << std::endl;
         return -1;
     }
 
@@ -730,13 +735,13 @@ template <typename T, typename TagT, typename LabelT> int Index<T, TagT, LabelT>
     return 0;
 }
 
+// 計算圖的進入點 (medoid)
 template <typename T, typename TagT, typename LabelT> uint32_t Index<T, TagT, LabelT>::calculate_entry_point()
 {
-    // REFACTOR TODO: This function does not support multi-threaded calculation of medoid.
-    // Must revisit if perf is a concern.
     return _data_store->calculate_medoid();
 }
 
+// 取得搜尋的初始節點 ID 列表 (包含 _start 和所有凍結點)
 template <typename T, typename TagT, typename LabelT> std::vector<uint32_t> Index<T, TagT, LabelT>::get_init_ids()
 {
     std::vector<uint32_t> init_ids;
@@ -755,9 +760,7 @@ template <typename T, typename TagT, typename LabelT> std::vector<uint32_t> Inde
     return init_ids;
 }
 
-// Find common filter between a node's labels and a given set of labels, while
-// taking into account universal label.
-// Note: incoming_labels should be sorted.
+// 檢查一個點的標籤是否與給定的過濾標籤有交集
 template <typename T, typename TagT, typename LabelT>
 bool Index<T, TagT, LabelT>::detect_common_filters(uint32_t point_id, bool search_invocation,
                                                    const std::vector<LabelT> &incoming_labels)
@@ -895,8 +898,10 @@ std::pair<uint32_t, uint32_t> Index<T, TagT, LabelT>::iterate_to_fixed_point(
     uint32_t hops = 0;
     uint32_t cmps = 0;
 
+    // 貪婪搜尋主迴圈：只要候選池中還有未擴展的節點，就繼續
     while (best_L_nodes.has_unexpanded_node())
     {
+        // 取出距離查詢點最近的未擴展節點 n
         auto nbr = best_L_nodes.closest_unexpanded();
         auto n = nbr.id;
 
@@ -924,8 +929,8 @@ std::pair<uint32_t, uint32_t> Index<T, TagT, LabelT>::iterate_to_fixed_point(
         if (_dynamic_index)
         {
             LockGuard guard(_locks[n]);
-            for (auto id : _graph_store->get_neighbours(n))
-            {
+        for (auto id : _graph_store->get_neighbours(n))
+        {
                 assert(id < _max_points + _num_frozen_pts);
 
                 if (use_filter)
@@ -935,11 +940,11 @@ std::pair<uint32_t, uint32_t> Index<T, TagT, LabelT>::iterate_to_fixed_point(
                         continue;
                 }
 
-                if (is_not_visited(id))
-                {
-                    id_scratch.push_back(id);
-                }
+            if (is_not_visited(id))
+            {
+                id_scratch.push_back(id);
             }
+        }
         }
         else
         {
@@ -981,7 +986,7 @@ std::pair<uint32_t, uint32_t> Index<T, TagT, LabelT>::iterate_to_fixed_point(
         compute_dists(id_scratch, dist_scratch);
         cmps += (uint32_t)id_scratch.size();
 
-        // Insert <id, dist> pairs into the pool of candidates
+        // 將 <鄰居, 距離> 對插入候選池
         for (size_t m = 0; m < id_scratch.size(); ++m)
         {
             best_L_nodes.insert(Neighbor(id_scratch[m], dist_scratch[m]));
@@ -990,6 +995,7 @@ std::pair<uint32_t, uint32_t> Index<T, TagT, LabelT>::iterate_to_fixed_point(
     return std::make_pair(hops, cmps);
 }
 
+// 為一個新節點搜尋鄰居並進行修剪
 template <typename T, typename TagT, typename LabelT>
 void Index<T, TagT, LabelT>::search_for_point_and_prune(int location, uint32_t Lindex,
                                                         std::vector<uint32_t> &pruned_list,
@@ -1048,6 +1054,7 @@ void Index<T, TagT, LabelT>::search_for_point_and_prune(int location, uint32_t L
 
     auto &pool = scratch->pool();
 
+    // 從池中移除自己
     for (uint32_t i = 0; i < pool.size(); i++)
     {
         if (pool[i].id == (uint32_t)location)
@@ -1068,6 +1075,11 @@ void Index<T, TagT, LabelT>::search_for_point_and_prune(int location, uint32_t L
     assert(_graph_store->get_total_points() == _max_points + _num_frozen_pts);
 }
 
+// Vamana 圖建立演算法的核心：Robust Prune。用於為節點選擇一組多樣化且穩健的鄰居。
+// 這個函式透過一個 alpha 參數來控制鄰居的多樣性。
+// 如果一個候選鄰居 p' 被一個已選中的鄰居 p "遮蔽" (occlude) 了，
+// (即 dist(p, p') < alpha * dist(query, p'))，那麼 p' 就會被修剪掉。
+// 這避免了選出的鄰居都聚集在同一個方向。
 template <typename T, typename TagT, typename LabelT>
 void Index<T, TagT, LabelT>::occlude_list(const uint32_t location, std::vector<Neighbor> &pool, const float alpha,
                                           const uint32_t degree, const uint32_t maxc, std::vector<uint32_t> &result,
@@ -1077,7 +1089,7 @@ void Index<T, TagT, LabelT>::occlude_list(const uint32_t location, std::vector<N
     if (pool.size() == 0)
         return;
 
-    // Truncate pool at maxc and initialize scratch spaces
+    // 將候選池截斷到 maxc 大小
     assert(std::is_sorted(pool.begin(), pool.end()));
     assert(result.size() == 0);
     if (pool.size() > maxc)
@@ -1110,11 +1122,11 @@ void Index<T, TagT, LabelT>::occlude_list(const uint32_t location, std::vector<N
             {
                 if (iter->id != location)
                 {
-                    result.push_back(iter->id);
+            result.push_back(iter->id);
                 }
             }
 
-            // Update occlude factor for points from iter+1 to pool.end()
+            // 更新其他候選點的遮蔽因子
             for (auto iter2 = iter + 1; iter2 != pool.end(); iter2++)
             {
                 auto t = iter2 - pool.begin();
@@ -1164,6 +1176,7 @@ void Index<T, TagT, LabelT>::occlude_list(const uint32_t location, std::vector<N
     }
 }
 
+// 修剪鄰居列表 (occlude_list 的包裝函式)
 template <typename T, typename TagT, typename LabelT>
 void Index<T, TagT, LabelT>::prune_neighbors(const uint32_t location, std::vector<Neighbor> &pool,
                                              std::vector<uint32_t> &pruned_list, InMemQueryScratch<T> *scratch)
@@ -1171,6 +1184,7 @@ void Index<T, TagT, LabelT>::prune_neighbors(const uint32_t location, std::vecto
     prune_neighbors(location, pool, _indexingRange, _indexingMaxC, _indexingAlpha, pruned_list, scratch);
 }
 
+// 修剪鄰居列表 (主體)
 template <typename T, typename TagT, typename LabelT>
 void Index<T, TagT, LabelT>::prune_neighbors(const uint32_t location, std::vector<Neighbor> &pool, const uint32_t range,
                                              const uint32_t max_candidate_size, const float alpha,
@@ -1195,10 +1209,12 @@ void Index<T, TagT, LabelT>::prune_neighbors(const uint32_t location, std::vecto
     std::sort(pool.begin(), pool.end());
     pruned_list.clear();
     pruned_list.reserve(range);
-
+    
+    // 呼叫 occlude_list 進行修剪
     occlude_list(location, pool, alpha, range, max_candidate_size, pruned_list, scratch);
     assert(pruned_list.size() <= range);
 
+    // 如果開啟了飽和圖選項，則將剩餘的最近鄰居也加入，直到達到 range 上限
     if (_saturate_graph && alpha > 1)
     {
         for (const auto &node : pool)
@@ -1234,7 +1250,7 @@ void Index<T, TagT, LabelT>::inter_insert(uint32_t n, std::vector<uint32_t> &pru
             {
                 if (des_pool.size() < (uint64_t)(defaults::GRAPH_SLACK_FACTOR * range))
                 {
-                    // des_pool.emplace_back(n);
+                    // 如果 des 的鄰居列表未滿，直接加入
                     _graph_store->add_neighbour(des, n);
                     prune_needed = false;
                 }
@@ -1246,7 +1262,7 @@ void Index<T, TagT, LabelT>::inter_insert(uint32_t n, std::vector<uint32_t> &pru
                     prune_needed = true;
                 }
             }
-        } // des lock is released by this point
+        } 
 
         if (prune_needed)
         {
@@ -1339,6 +1355,7 @@ template <typename T, typename TagT, typename LabelT> void Index<T, TagT, LabelT
             assert(_graph_store->get_neighbours((location_t)node).size() <= _indexingRange);
         }
 
+        // 步驟 3: 為目前節點和它的新鄰居建立雙向連接
         inter_insert(node, pruned_list, scratch);
 
         if (node_ctr % 100000 == 0)
@@ -3066,12 +3083,15 @@ template <typename T, typename TagT, typename LabelT> int Index<T, TagT, LabelT>
     assert(_tag_to_location[tag] < _max_points);
 
     const auto location = _tag_to_location[tag];
+    
+    // 將位置加入刪除集合，並從標籤映射中移除
     _delete_set->insert(location);
     _location_to_tag.erase(location);
     _tag_to_location.erase(tag);
     return 0;
 }
 
+// (動態索引) 整理刪除的節點
 template <typename T, typename TagT, typename LabelT>
 void Index<T, TagT, LabelT>::lazy_delete(const std::vector<TagT> &tags, std::vector<TagT> &failed_tags)
 {
@@ -3165,7 +3185,7 @@ template <typename T, typename TagT, typename LabelT> void Index<T, TagT, LabelT
     visited.set(_start);
 
     for (uint32_t i = (uint32_t)_max_points; i < _max_points + _num_frozen_pts; ++i)
-    {
+{
         if (i != _start)
         {
             bfs_sets[0].insert(i);
@@ -3313,7 +3333,7 @@ void Index<T, TagT, LabelT>::search_with_optimized_layout(const T *query, size_t
         for (uint32_t m = 0; m < MaxM; ++m)
             _mm_prefetch(_opt_graph + _node_size * neighbors[m], _MM_HINT_T0);
         for (uint32_t m = 0; m < MaxM; ++m)
-        {
+    {
             uint32_t id = neighbors[m];
             if (flags[id])
                 continue;

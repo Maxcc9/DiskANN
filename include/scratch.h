@@ -3,6 +3,10 @@
 
 #pragma once
 
+// 本檔案定義了在搜尋和建立索引過程中使用的「暫存空間」(Scratch Space) 相關的類別。
+// 為了避免在高效能要求的程式碼路徑 (hot path) 中動態配置記憶體，DiskANN 會為每個執行緒
+// 預先分配一個暫存空間物件，該物件包含了執行一次查詢或插入所需的所有臨時資料結構。
+
 #include <vector>
 
 #include "boost_dynamic_bitset_fwd.h"
@@ -22,17 +26,21 @@ namespace diskann
 template <typename T> class PQScratch;
 
 //
-// AbstractScratch space for in-memory index based search
+// 用於記憶體內索引搜尋的暫存空間
 //
 template <typename T> class InMemQueryScratch : public AbstractScratch<T>
 {
   public:
     ~InMemQueryScratch();
+    // 建構函式：根據搜尋和索引參數初始化所有內部資料結構的大小。
     InMemQueryScratch(uint32_t search_l, uint32_t indexing_l, uint32_t r, uint32_t maxc, size_t dim, size_t aligned_dim,
                       size_t alignment_factor, bool init_pq_scratch = false);
+    // 如果查詢時的 L (候選集大小) 大於初始化時的大小，則動態擴展相關資料結構。
     void resize_for_new_L(uint32_t new_search_l);
+    // 清理暫存空間，為下一次查詢做準備。
     void clear();
 
+    // --- 以下為各個暫存資料結構的存取介面 ---
     inline uint32_t get_L()
     {
         return _L;
@@ -53,34 +61,42 @@ template <typename T> class InMemQueryScratch : public AbstractScratch<T>
     {
         return this->_pq_scratch;
     }
+    // 在 RobustPrune 中使用的擴展候選池
     inline std::vector<Neighbor> &pool()
     {
         return _pool;
     }
+    // 儲存 L 個最佳候選點的優先級隊列
     inline NeighborPriorityQueue &best_l_nodes()
     {
         return _best_l_nodes;
     }
+    // 在 occlude_list 中使用的遮蔽因子向量
     inline std::vector<float> &occlude_factor()
     {
         return _occlude_factor;
     }
+    // 已訪問節點的集合 (robin_set 版本)
     inline tsl::robin_set<uint32_t> &inserted_into_pool_rs()
     {
         return _inserted_into_pool_rs;
     }
+    // 已訪問節點的集合 (bitset 版本，點數較少時更高效)
     inline boost::dynamic_bitset<> &inserted_into_pool_bs()
     {
         return *_inserted_into_pool_bs;
     }
+    // 用於批次計算距離的臨時節點 ID 緩衝區
     inline std::vector<uint32_t> &id_scratch()
     {
         return _id_scratch;
     }
+    // 用於批次計算距離的臨時距離值緩衝區
     inline std::vector<float> &dist_scratch()
     {
         return _dist_scratch;
     }
+    // 在處理刪除時使用的擴展節點集合
     inline tsl::robin_set<uint32_t> &expanded_nodes_set()
     {
         return _expanded_nodes_set;
@@ -95,57 +111,35 @@ template <typename T> class InMemQueryScratch : public AbstractScratch<T>
     }
 
   private:
-    uint32_t _L;
-    uint32_t _R;
-    uint32_t _maxc;
+    uint32_t _L;  // 搜尋候選列表大小
+    uint32_t _R;  // 圖的最大出度
+    uint32_t _maxc; // 修剪時的最大候選點數量
 
-    // _pool stores all neighbors explored from best_L_nodes.
-    // Usually around L+R, but could be higher.
-    // Initialized to 3L+R for some slack, expands as needed.
     std::vector<Neighbor> _pool;
-
-    // _best_l_nodes is reserved for storing best L entries
-    // Underlying storage is L+1 to support inserts
     NeighborPriorityQueue _best_l_nodes;
-
-    // _occlude_factor.size() >= pool.size() in occlude_list function
-    // _pool is clipped to maxc in occlude_list before affecting _occlude_factor
-    // _occlude_factor is initialized to maxc size
     std::vector<float> _occlude_factor;
-
-    // Capacity initialized to 20L
     tsl::robin_set<uint32_t> _inserted_into_pool_rs;
-
-    // Use a pointer here to allow for forward declaration of dynamic_bitset
-    // in public headers to avoid making boost a dependency for clients
-    // of DiskANN.
     boost::dynamic_bitset<> *_inserted_into_pool_bs;
-
-    // _id_scratch.size() must be > R*GRAPH_SLACK_FACTOR for iterate_to_fp
     std::vector<uint32_t> _id_scratch;
-
-    // _dist_scratch must be > R*GRAPH_SLACK_FACTOR for iterate_to_fp
-    // _dist_scratch should be at least the size of id_scratch
     std::vector<float> _dist_scratch;
-
-    //  Buffers used in process delete, capacity increases as needed
     tsl::robin_set<uint32_t> _expanded_nodes_set;
     std::vector<Neighbor> _expanded_nghrs_vec;
     std::vector<uint32_t> _occlude_list_output;
 };
 
 //
-// AbstractScratch space for SSD index based search
+// 用於 SSD 索引搜尋的暫存空間
 //
-
 template <typename T> class SSDQueryScratch : public AbstractScratch<T>
 {
   public:
-    T *coord_scratch = nullptr; // MUST BE AT LEAST [sizeof(T) * data_dim]
+    // 用於儲存從磁碟讀取的向量資料
+    T *coord_scratch = nullptr;
+    // 用於儲存從磁碟讀取的原始磁區資料
+    char *sector_scratch = nullptr;
+    size_t sector_idx = 0;
 
-    char *sector_scratch = nullptr; // MUST BE AT LEAST [MAX_N_SECTOR_READS * SECTOR_LEN]
-    size_t sector_idx = 0;          // index of next [SECTOR_LEN] scratch to use
-
+    // SSD 搜尋中使用的已訪問集合和候選集
     tsl::robin_set<size_t> visited;
     NeighborPriorityQueue retset;
     std::vector<Neighbor> full_retset;
@@ -156,6 +150,7 @@ template <typename T> class SSDQueryScratch : public AbstractScratch<T>
     void reset();
 };
 
+// 代表一個 SSD 搜尋執行緒所需的全部資料，包含暫存空間和 I/O 上下文
 template <typename T> class SSDThreadData
 {
   public:
@@ -167,11 +162,14 @@ template <typename T> class SSDThreadData
 };
 
 //
-// Class to avoid the hassle of pushing and popping the query scratch.
+// RAII (資源獲取即初始化) 風格的暫存空間管理器
+// 這個類別的設計是為了簡化暫存空間的生命週期管理。
 //
 template <typename T> class ScratchStoreManager
 {
   public:
+    // 在建構時，從執行緒安全的佇列中彈出一個可用的暫存空間。
+    // 如果佇列為空，則會等待直到有其他執行緒歸還暫存空間。
     ScratchStoreManager(ConcurrentQueue<T *> &query_scratch) : _scratch_pool(query_scratch)
     {
         _scratch = query_scratch.pop();
@@ -181,11 +179,14 @@ template <typename T> class ScratchStoreManager
             _scratch = query_scratch.pop();
         }
     }
+    // 取得暫存空間的指標。
     T *scratch_space()
     {
         return _scratch;
     }
 
+    // 在解構時 (離開作用域時)，自動清理暫存空間並將其歸還到佇列中，
+    // 以便其他執行緒可以重複使用。
     ~ScratchStoreManager()
     {
         _scratch->clear();
@@ -193,6 +194,7 @@ template <typename T> class ScratchStoreManager
         _scratch_pool.push_notify_all();
     }
 
+    // 銷毀佇列中所有的暫存空間物件 (在索引解構時呼叫)。
     void destroy()
     {
         while (!_scratch_pool.empty())

@@ -3,85 +3,64 @@
 
 #pragma once
 
+// 本檔案宣告了專案中使用的數學工具函式，
+// 特別是 k-means 叢集演算法的核心元件。
+
 #include "common_includes.h"
 #include "utils.h"
 
 namespace math_utils
 {
 
+// 計算兩個浮點數向量的 L2 距離平方
 float calc_distance(float *vec_1, float *vec_2, size_t dim);
 
-// compute l2-squared norms of data stored in row major num_points * dim,
-// needs
-// to be pre-allocated
+// 預先計算一批向量的 L2 範數平方值。這在 k-means 中是個優化，
+// 因為點的範數在迭代過程中不會改變。
 void compute_vecs_l2sq(float *vecs_l2sq, float *data, const size_t num_points, const size_t dim);
 
+// (未使用) 使用一個隨機旋轉矩陣來旋轉資料。
 void rotate_data_randomly(float *data, size_t num_points, size_t dim, float *rot_mat, float *&new_mat,
                           bool transpose_rot = false);
 
-// calculate closest center to data of num_points * dim (row major)
-// centers is num_centers * dim (row major)
-// data_l2sq has pre-computed squared norms of data
-// centers_l2sq has pre-computed squared norms of centers
-// pre-allocated center_index will contain id of k nearest centers
-// pre-allocated dist_matrix shound be num_points * num_centers and contain
-// squared distances
-
-// Ideally used only by compute_closest_centers
+// k-means 的「分配步驟」(Assignment Step) 的核心實作。
+// 計算一小批資料點到所有中心點的距離，並找出最近的 k 個中心點。
 void compute_closest_centers_in_block(const float *const data, const size_t num_points, const size_t dim,
                                       const float *const centers, const size_t num_centers,
                                       const float *const docs_l2sq, const float *const centers_l2sq,
                                       uint32_t *center_index, float *const dist_matrix, size_t k = 1);
 
-// Given data in num_points * new_dim row major
-// Pivots stored in full_pivot_data as k * new_dim row major
-// Calculate the closest pivot for each point and store it in vector
-// closest_centers_ivf (which needs to be allocated outside)
-// Additionally, if inverted index is not null (and pre-allocated), it will
-// return inverted index for each center Additionally, if pts_norms_squared is
-// not null, then it will assume that point norms are pre-computed and use
-// those
-// values
-
+// `compute_closest_centers_in_block` 的包裝函式，處理大規模資料。
 void compute_closest_centers(float *data, size_t num_points, size_t dim, float *pivot_data, size_t num_centers,
                              size_t k, uint32_t *closest_centers_ivf, std::vector<size_t> *inverted_index = NULL,
                              float *pts_norms_squared = NULL);
 
-// if to_subtract is 1, will subtract nearest center from each row. Else will
-// add. Output will be in data_load iself.
-// Nearest centers need to be provided in closst_centers.
-
+// 計算殘差向量 (data_point - closest_center)。
+// 這是多階段量化 (如 Residual Quantization) 的關鍵步驟。
 void process_residuals(float *data_load, size_t num_points, size_t dim, float *cur_pivot_data, size_t num_centers,
                        uint32_t *closest_centers, bool to_subtract);
 
 } // namespace math_utils
 
+// k-means 演算法的命名空間
 namespace kmeans
 {
 
-// run Lloyds one iteration
-// Given data in row major num_points * dim, and centers in row major
-// num_centers * dim
-// And squared lengths of data points, output the closest center to each data
-// point, update centers, and also return inverted index.
-// If closest_centers == NULL, will allocate memory and return.
-// Similarly, if closest_docs == NULL, will allocate memory and return.
-
+// 執行一次 Lloyd's 演算法的迭代。
+// 包含「分配步驟」(將點分配到最近的中心) 和「更新步驟」(重新計算每個叢集的質心)。
 float lloyds_iter(float *data, size_t num_points, size_t dim, float *centers, size_t num_centers, float *docs_l2sq,
                   std::vector<size_t> *closest_docs, uint32_t *&closest_center);
 
-// Run Lloyds until max_reps or stopping criterion
-// If you pass NULL for closest_docs and closest_center, it will NOT return
-// the results, else it will assume appriate allocation as closest_docs = new
-// vector<size_t> [num_centers], and closest_center = new size_t[num_points]
-// Final centers are output in centers as row major num_centers * dim
-//
+// 執行完整的 Lloyd's k-means 演算法。
+// 它會重複呼叫 `lloyds_iter` 直到達到最大迭代次數或收斂為止。
 float run_lloyds(float *data, size_t num_points, size_t dim, float *centers, const size_t num_centers,
                  const size_t max_reps, std::vector<size_t> *closest_docs, uint32_t *closest_center);
 
-// assumes already memory allocated for pivot_data as new
-// float[num_centers*dim] and select randomly num_centers points as pivots
+// 隨機選擇 k 個點作為初始中心點 (pivots)。
 void selecting_pivots(float *data, size_t num_points, size_t dim, float *pivot_data, size_t num_centers);
 
+// 使用 k-means++ 演算法來選擇初始中心點。
+// k-means++ 能選擇出分佈更均勻的初始中心點，有助於演算法更快、更穩定地收斂。
+// 其核心思想是：下一個中心點應該盡量遠離已經選擇的中心點。
 void kmeanspp_selecting_pivots(float *data, size_t num_points, size_t dim, float *pivot_data, size_t num_centers);
 } // namespace kmeans

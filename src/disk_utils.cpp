@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+// 本檔案實作了建立 SSD 優化磁碟索引所需的高階函式。
+// 它協調了資料分割、Vamana 圖建立、PQ 壓縮以及最終檔案佈局組合等多个複雜階段。
+
 #include "common_includes.h"
 
 #if defined(DISKANN_RELEASE_UNUSED_TCMALLOC_MEMORY_AT_CHECKPOINTS) && defined(DISKANN_BUILD)
@@ -252,7 +255,7 @@ int merge_shards(const std::string &vamana_prefix, const std::string &vamana_suf
         read_idmap(idmaps_prefix + std::to_string(shard) + idmaps_suffix, idmaps[shard]);
     }
 
-    // find max node id
+    // 步驟 2: 找到最大的全域節點 ID，以確定最終圖的大小。
     size_t nnodes = 0;
     size_t nelems = 0;
     for (auto &idmap : idmaps)
@@ -266,7 +269,7 @@ int merge_shards(const std::string &vamana_prefix, const std::string &vamana_suf
     nnodes++;
     diskann::cout << "# nodes: " << nnodes << ", max. degree: " << max_degree << std::endl;
 
-    // compute inverse map: node -> shards
+    // 步驟 3: 建立一個反向映射，從全域節點 ID 找到它所在的分區。
     std::vector<std::pair<uint32_t, uint32_t>> node_shard;
     node_shard.reserve(nelems);
     for (size_t shard = 0; shard < nshards; shard++)
@@ -434,7 +437,7 @@ int merge_shards(const std::string &vamana_prefix, const std::string &vamana_suf
                 nhood_set[p] = 0;
             final_nhood.clear();
         }
-        // read from shard_id ifstream
+        // 從對應分區的圖檔案中讀取該節點的局部鄰居列表
         vamana_readers[shard_id].read((char *)&shard_nnbrs, sizeof(uint32_t));
 
         if (shard_nnbrs == 0)
@@ -635,9 +638,10 @@ int build_merged_vamana_index(std::string base_file, diskann::Metric compareMetr
     size_t base_num, base_dim;
     diskann::get_bin_metadata(base_file, base_num, base_dim);
 
+    // 估算建立完整索引所需的記憶體
     double full_index_ram = estimate_ram_usage(base_num, (uint32_t)base_dim, sizeof(T), R);
 
-    // TODO: Make this honest when there is filter support
+    // 情況 1: 記憶體足夠，一次性在記憶體中建立完整索引。
     if (full_index_ram < ram_budget * 1024 * 1024 * 1024)
     {
         diskann::cout << "Full index fits in RAM budget, should consume at most "
@@ -654,7 +658,7 @@ int build_merged_vamana_index(std::string base_file, diskann::Metric compareMetr
                                                defaults::NUM_FROZEN_POINTS_STATIC, false, false, false,
                                                build_pq_bytes > 0, build_pq_bytes, use_opq, use_filters);
         if (!use_filters)
-            _index.build(base_file.c_str(), base_num);
+        _index.build(base_file.c_str(), base_num);
         else
         {
             if (universal_label != "")
@@ -690,7 +694,7 @@ int build_merged_vamana_index(std::string base_file, diskann::Metric compareMetr
     int num_parts =
         partition_with_ram_budget<T>(base_file, sampling_rate, ram_budget, 2 * R / 3, merged_index_prefix, 2);
     diskann::cout << timer.elapsed_seconds_for_step("partitioning data ") << std::endl;
-
+    
     std::string cur_centroid_filepath = merged_index_prefix + "_centroids.bin";
     std::rename(cur_centroid_filepath.c_str(), centroids_file.c_str());
 
@@ -708,7 +712,7 @@ int build_merged_vamana_index(std::string base_file, diskann::Metric compareMetr
         std::string shard_labels_file = merged_index_prefix + "_subshard-" + std::to_string(p) + "_labels.txt";
 
         retrieve_shard_data_from_ids<T>(base_file, shard_ids_file, shard_base_file);
-
+        
         std::string shard_index_file = merged_index_prefix + "_subshard-" + std::to_string(p) + "_mem.index";
 
         diskann::IndexWriteParameters low_degree_params = diskann::IndexWriteParametersBuilder(L, 2 * R / 3)
@@ -726,7 +730,7 @@ int build_merged_vamana_index(std::string base_file, diskann::Metric compareMetr
                                  build_pq_bytes, use_opq);
         if (!use_filters)
         {
-            _index.build(shard_base_file.c_str(), shard_base_pts);
+        _index.build(shard_base_file.c_str(), shard_base_pts);
         }
         else
         {
@@ -971,7 +975,7 @@ void create_disk_layout(const std::string base_file, const std::string mem_index
     uint64_t cur_node_id = 0;
 
     if (nnodes_per_sector > 0)
-    { // Write multiple nodes per sector
+    { // 每個磁區寫入多個節點
         for (uint64_t sector = 0; sector < n_sectors; sector++)
         {
             if (sector % 100000 == 0)
@@ -1016,7 +1020,7 @@ void create_disk_layout(const std::string base_file, const std::string mem_index
                 memcpy(sector_node_buf, node_buf.get(), max_node_len);
                 cur_node_id++;
             }
-            // flush sector to disk
+            // 將填滿的磁區緩衝區寫入檔案
             diskann_writer.write(sector_buf.get(), defaults::SECTOR_LEN);
         }
     }
@@ -1044,7 +1048,7 @@ void create_disk_layout(const std::string base_file, const std::string mem_index
             if (nnbrs > width_u32)
             {
                 vamana_reader.seekg((nnbrs - width_u32) * sizeof(uint32_t), vamana_reader.cur);
-            }
+    }
 
             // write coords of node first
             //  T *node_coords = data + ((uint64_t) ndims_64 * cur_node_id);
@@ -1097,6 +1101,7 @@ void create_disk_layout(const std::string base_file, const std::string mem_index
     diskann::cout << "Output disk index file written to " << output_file << std::endl;
 }
 
+// 建立磁碟索引的主進入點函式
 template <typename T, typename LabelT>
 int build_disk_index(const char *dataFilePath, const char *indexFilePath, const char *indexBuildParameters,
                      diskann::Metric compareMetric, bool use_opq, const std::string &codebook_prefix, bool use_filters,
@@ -1112,7 +1117,7 @@ int build_disk_index(const char *dataFilePath, const char *indexFilePath, const 
         param_list.push_back(cur_param);
     }
     if (param_list.size() < 5 || param_list.size() > 9)
-    {
+{
         diskann::cout << "Correct usage of parameters is R (max degree)\n"
                          "L (indexing list size, better if >= R)\n"
                          "B (RAM limit of final index in GB)\n"

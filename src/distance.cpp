@@ -1,5 +1,8 @@
-// TODO
-// CHECK COSINE ON LINUX
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT license.
+
+// 本檔案包含了各種距離計算函式的具體實作。
+// 其中大量使用了 SIMD (單指令多資料流) 指令集 (如 AVX, AVX2) 來加速計算。
 
 #ifdef _WINDOWS
 #include <immintrin.h>
@@ -23,7 +26,7 @@ namespace diskann
 {
 
 //
-// Base Class Implementatons
+// 距離計算基底類別的預設實作
 //
 template <typename T>
 float Distance<T>::compare(const T *a, const T *b, const float normA, const float normB, uint32_t length) const
@@ -51,6 +54,7 @@ void Distance<T>::preprocess_base_points(T *original_data, const size_t orig_dim
 {
 }
 
+// 預設的查詢預處理函式，僅複製資料。
 template <typename T> void Distance<T>::preprocess_query(const T *query_vec, const size_t query_dim, T *scratch_query)
 {
     std::memcpy(scratch_query, query_vec, query_dim * sizeof(T));
@@ -62,7 +66,7 @@ template <typename T> size_t Distance<T>::get_required_alignment() const
 }
 
 //
-// Cosine distance functions.
+// 餘弦距離函式
 //
 
 float DistanceCosineInt8::compare(const int8_t *a, const int8_t *b, uint32_t length) const
@@ -77,7 +81,7 @@ float DistanceCosineInt8::compare(const int8_t *a, const int8_t *b, uint32_t len
         magB += ((int32_t)b[i]) * ((int32_t)b[i]);
         scalarProduct += ((int32_t)a[i]) * ((int32_t)b[i]);
     }
-    // similarity == 1-cosine distance
+    // 餘弦距離 = 1 - 餘弦相似度
     return 1.0f - (float)(scalarProduct / (sqrt(magA) * sqrt(magB)));
 #endif
 }
@@ -94,7 +98,7 @@ float DistanceCosineFloat::compare(const float *a, const float *b, uint32_t leng
         magB += (b[i]) * (b[i]);
         scalarProduct += (a[i]) * (b[i]);
     }
-    // similarity == 1-cosine distance
+    // 餘弦距離 = 1 - 餘弦相似度
     return 1.0f - (scalarProduct / (sqrt(magA) * sqrt(magB)));
 #endif
 }
@@ -108,12 +112,12 @@ float SlowDistanceCosineUInt8::compare(const uint8_t *a, const uint8_t *b, uint3
         magB += ((uint32_t)b[i]) * ((uint32_t)b[i]);
         scalarProduct += ((uint32_t)a[i]) * ((uint32_t)b[i]);
     }
-    // similarity == 1-cosine distance
+    // 餘弦距離 = 1 - 餘弦相似度
     return 1.0f - (float)(scalarProduct / (sqrt(magA) * sqrt(magB)));
 }
 
 //
-// L2 distance functions.
+// L2 距離 (歐幾里得距離平方) 函式
 //
 
 float DistanceL2Int8::compare(const int8_t *a, const int8_t *b, uint32_t size) const
@@ -173,6 +177,7 @@ float DistanceL2UInt8::compare(const uint8_t *a, const uint8_t *b, uint32_t size
     return (float)result;
 }
 
+// L2 距離 (float 版本)，使用 AVX2 指令集優化
 #ifndef _WINDOWS
 float DistanceL2Float::compare(const float *a, const float *b, uint32_t size) const
 {
@@ -185,9 +190,9 @@ float DistanceL2Float::compare(const float *a, const float *b, uint32_t size) co
 
     float result = 0;
 #ifdef USE_AVX2
-    // assume size is divisible by 8
+    // 假設 size 是 8 的倍數
     uint16_t niters = (uint16_t)(size / 8);
-    __m256 sum = _mm256_setzero_ps();
+    __m256 sum = _mm256_setzero_ps(); // 初始化 256 位元暫存器為 0
     for (uint16_t j = 0; j < niters; j++)
     {
         // scope is a[8j:8j+7], b[8j:8j+7]
@@ -197,18 +202,22 @@ float DistanceL2Float::compare(const float *a, const float *b, uint32_t size) co
             _mm_prefetch((char *)(a + 8 * (j + 1)), _MM_HINT_T0);
             _mm_prefetch((char *)(b + 8 * (j + 1)), _MM_HINT_T0);
         }
+        // 載入 8 個浮點數到 AVX 暫存器
         __m256 a_vec = _mm256_load_ps(a + 8 * j);
-        // load b_vec
         __m256 b_vec = _mm256_load_ps(b + 8 * j);
-        // a_vec - b_vec
+        
+        // 計算 (a_vec - b_vec)
         __m256 tmp_vec = _mm256_sub_ps(a_vec, b_vec);
 
+        // 計算 (a-b)^2 並累加到 sum 中
+        // FMA (Fused Multiply-Add) 指令: sum = (tmp_vec * tmp_vec) + sum
         sum = _mm256_fmadd_ps(tmp_vec, tmp_vec, sum);
     }
 
-    // horizontal add sum
+    // 將暫存器中的 8 個浮點數水平相加，得到最終結果
     result = _mm256_reduce_add_ps(sum);
 #else
+    // 如果不支援 AVX2，則使用 OpenMP SIMD 或普通迴圈
 #ifndef _WINDOWS
 #pragma omp simd reduction(+ : result) aligned(a, b : 32)
 #endif
@@ -220,6 +229,7 @@ float DistanceL2Float::compare(const float *a, const float *b, uint32_t size) co
     return result;
 }
 
+// 慢速 L2 距離實作，作為備用
 template <typename T> float SlowDistanceL2<T>::compare(const T *a, const T *b, uint32_t length) const
 {
     float result = 0.0f;
@@ -302,8 +312,8 @@ template <typename T> float DistanceInnerProduct<T>::inner_product(const T *a, c
 {
     if (!std::is_floating_point<T>::value)
     {
-        diskann::cerr << "ERROR: Inner Product only defined for float currently." << std::endl;
-        throw diskann::ANNException("ERROR: Inner Product only defined for float currently.", -1, __FUNCSIG__, __FILE__,
+        diskann::cerr << "錯誤: 內積目前僅支援浮點數。" << std::endl;
+        throw diskann::ANNException("錯誤: 內積目前僅支援浮點數。", -1, __FUNCSIG__, __FILE__,
                                     __LINE__);
     }
 
@@ -311,11 +321,12 @@ template <typename T> float DistanceInnerProduct<T>::inner_product(const T *a, c
 
 #ifdef __GNUC__
 #ifdef USE_AVX2
+// AVX 點積計算的宏
 #define AVX_DOT(addr1, addr2, dest, tmp1, tmp2)                                                                        \
-    tmp1 = _mm256_loadu_ps(addr1);                                                                                     \
+    tmp1 = _mm256_loadu_ps(addr1);           /* 載入 8 個浮點數 */                                                        \
     tmp2 = _mm256_loadu_ps(addr2);                                                                                     \
-    tmp1 = _mm256_mul_ps(tmp1, tmp2);                                                                                  \
-    dest = _mm256_add_ps(dest, tmp1);
+    tmp1 = _mm256_mul_ps(tmp1, tmp2);        /* 逐元素相乘 */                                                            \
+    dest = _mm256_add_ps(dest, tmp1);        /* 累加到結果 */
 
     __m256 sum;
     __m256 l0, l1;
@@ -335,12 +346,13 @@ template <typename T> float DistanceInnerProduct<T>::inner_product(const T *a, c
         AVX_DOT(e_l, e_r, sum, l0, r0);
     }
 
+    // 迴圈展開，一次處理 16 個浮點數
     for (uint32_t i = 0; i < DD; i += 16, l += 16, r += 16)
     {
         AVX_DOT(l, r, sum, l0, r0);
         AVX_DOT(l + 8, r + 8, sum, l1, r1);
     }
-    _mm256_storeu_ps(unpack, sum);
+    _mm256_storeu_ps(unpack, sum); // 將結果存回記憶體
     result = unpack[0] + unpack[1] + unpack[2] + unpack[3] + unpack[4] + unpack[5] + unpack[6] + unpack[7];
 
 #else
@@ -567,9 +579,11 @@ uint32_t AVXNormalizedCosineDistanceFloat::post_normalization_dimension(uint32_t
 }
 bool AVXNormalizedCosineDistanceFloat::preprocessing_required() const
 {
-    return true;
+    return true; // 需要預處理 (正規化)
 }
-void AVXNormalizedCosineDistanceFloat::preprocess_base_points(float *original_data, const size_t orig_dim,
+
+// 對一批基底資料點進行正規化
+void AVXNormalizedCosineDistanceFloat::preprocess_base_points(float *original_data, const size_t orig_dim, 
                                                               const size_t num_points)
 {
     for (uint32_t i = 0; i < num_points; i++)
@@ -578,68 +592,66 @@ void AVXNormalizedCosineDistanceFloat::preprocess_base_points(float *original_da
     }
 }
 
-void AVXNormalizedCosineDistanceFloat::preprocess_query(const float *query_vec, const size_t query_dim,
+// 對查詢向量進行正規化
+void AVXNormalizedCosineDistanceFloat::preprocess_query(const float *query_vec, const size_t query_dim, 
                                                         float *query_scratch)
 {
     normalize_and_copy(query_vec, (uint32_t)query_dim, query_scratch);
 }
 
-void AVXNormalizedCosineDistanceFloat::normalize_and_copy(const float *query_vec, const uint32_t query_dim,
+void AVXNormalizedCosineDistanceFloat::normalize_and_copy(const float *query_vec, const uint32_t query_dim, 
                                                           float *query_target) const
 {
     float norm = get_norm(query_vec, query_dim);
-
     for (uint32_t i = 0; i < query_dim; i++)
     {
         query_target[i] = query_vec[i] / norm;
     }
 }
 
-// Get the right distance function for the given metric.
+// 工廠函式：根據度量類型和 CPU 支援的指令集，返回最適合的 Distance 物件實例。
+// 這使得程式庫可以在執行時期自動選擇最高效能的計算路徑。
 template <> diskann::Distance<float> *get_distance_function(diskann::Metric m)
 {
     if (m == diskann::Metric::L2)
     {
-        if (Avx2SupportedCPU)
+        if (Avx2SupportedCPU) // 如果 CPU 支援 AVX2
         {
-            diskann::cout << "L2: Using AVX2 distance computation DistanceL2Float" << std::endl;
+            diskann::cout << "L2: 使用 AVX2 距離計算 DistanceL2Float" << std::endl;
             return new diskann::DistanceL2Float();
         }
-        else if (AvxSupportedCPU)
+        else if (AvxSupportedCPU) // 如果 CPU 支援 AVX
         {
-            diskann::cout << "L2: AVX2 not supported. Using AVX distance computation" << std::endl;
+            diskann::cout << "L2: 不支援 AVX2。使用 AVX 距離計算" << std::endl;
             return new diskann::AVXDistanceL2Float();
         }
-        else
+        else // 如果都不支援
         {
-            diskann::cout << "L2: Older CPU. Using slow distance computation" << std::endl;
+            diskann::cout << "L2: 較舊的 CPU。使用慢速距離計算" << std::endl;
             return new diskann::SlowDistanceL2<float>();
         }
     }
     else if (m == diskann::Metric::COSINE)
     {
-        diskann::cout << "Cosine: Using either AVX or AVX2 implementation" << std::endl;
+        diskann::cout << "餘弦: 使用 AVX 或 AVX2 實作" << std::endl;
         return new diskann::DistanceCosineFloat();
     }
     else if (m == diskann::Metric::INNER_PRODUCT)
     {
-        diskann::cout << "Inner product: Using AVX2 implementation "
-                         "AVXDistanceInnerProductFloat"
+        diskann::cout << "內積: 使用 AVX2 實作 AVXDistanceInnerProductFloat"
                       << std::endl;
         return new diskann::AVXDistanceInnerProductFloat();
     }
     else if (m == diskann::Metric::FAST_L2)
     {
-        diskann::cout << "Fast_L2: Using AVX2 implementation with norm "
-                         "memoization DistanceFastL2<float>"
+        diskann::cout << "Fast_L2: 使用帶有範數記憶的 AVX2 實作 DistanceFastL2<float>"
                       << std::endl;
         return new diskann::DistanceFastL2<float>();
     }
     else
     {
         std::stringstream stream;
-        stream << "Only L2, cosine, and inner product supported for floating "
-                  "point vectors as of now."
+        stream << "目前僅支援浮點數向量的 L2、코사인和內積度量。"
                << std::endl;
         diskann::cerr << stream.str() << std::endl;
         throw diskann::ANNException(stream.str(), -1, __FUNCSIG__, __FILE__, __LINE__);

@@ -1,6 +1,13 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+// 本檔案是一個範例應用程式，展示如何建立一個為 SSD 優化的磁碟索引 (Disk Index)。
+// 這個過程比建立記憶體索引更複雜，通常包含以下步驟：
+// 1. (可選) 將大型資料集分割成多個可以載入記憶體的分區 (shards)。
+// 2. 對每個分區建立一個記憶體內的 Vamana 圖索引。
+// 3. (可選) 訓練 PQ 碼本並將原始向量資料壓縮。
+// 4. 將所有分區的圖和壓縮後的資料合併成最終的磁碟索引檔案。
+
 #include <omp.h>
 #include <boost/program_options.hpp>
 
@@ -15,13 +22,15 @@ namespace po = boost::program_options;
 
 int main(int argc, char **argv)
 {
+    // --- 參數定義 ---
     std::string data_type, dist_fn, data_path, index_path_prefix, codebook_prefix, label_file, universal_label,
         label_type;
     uint32_t num_threads, R, L, disk_PQ, build_PQ, QD, Lf, filter_threshold;
-    float B, M;
+    float B, M; // B: 搜尋時的 DRAM 預算, M: 建立時的 DRAM 預算
     bool append_reorder_data = false;
     bool use_opq = false;
 
+    // --- 使用 boost::program_options 解析命令列參數 ---
     po::options_description desc{
         program_options_utils::make_program_description("build_disk_index", "Build a disk-based index.")};
     try
@@ -141,6 +150,9 @@ int main(int argc, char **argv)
 
     try
     {
+        // --- 根據資料類型，呼叫對應的模板函式來執行索引建立 ---
+        // 真正的建立邏輯被封裝在 `diskann::build_disk_index` 函式中 (位於 disk_utils.h/.cpp)。
+        // 這個 main 函式主要負責解析參數並進行分派。
         if (label_file != "" && label_type == "ushort")
         {
             if (data_type == std::string("int8"))

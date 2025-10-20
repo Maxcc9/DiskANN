@@ -1,7 +1,11 @@
-﻿// Copyright (c) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
 #pragma once
+
+// 本檔案宣告了建立和處理磁碟索引所需的高階輔助函式。
+// 這些函式協調了整個複雜的建立流程，包括資料分割、圖建立、PQ壓縮和檔案合併等。
+
 #include <algorithm>
 #include <fcntl.h>
 #include <cassert>
@@ -33,7 +37,9 @@ typedef int FileHandle;
 
 namespace diskann
 {
+// 用於索引預熱 (warmup) 的最大採樣點數
 const size_t MAX_SAMPLE_POINTS_FOR_WARMUP = 100000;
+// 用於訓練 PQ 碼本的資料採樣比例
 const double PQ_TRAINING_SET_FRACTION = 0.1;
 const double SPACE_FOR_CACHED_NODES_IN_GB = 0.25;
 const double THRESHOLD_FOR_CACHING_IN_GB = 1.0;
@@ -84,12 +90,21 @@ DISKANN_DLLEXPORT int build_merged_vamana_index(std::string base_file, diskann::
                                                 const std::string &labels_to_medoids_file = std::string(""),
                                                 const std::string &universal_label = "", const uint32_t Lf = 0);
 
+// 自動優化光束寬度 (beamwidth)。
+// 透過在一小部分調校樣本上執行搜尋，自動找到一個在速度和精度之間取得良好平衡的 beamwidth 值。
 template <typename T, typename LabelT>
 DISKANN_DLLEXPORT uint32_t optimize_beamwidth(std::unique_ptr<diskann::PQFlashIndex<T, LabelT>> &_pFlashIndex,
                                               T *tuning_sample, uint64_t tuning_sample_num,
                                               uint64_t tuning_sample_aligned_dim, uint32_t L, uint32_t nthreads,
                                               uint32_t start_bw = 2);
 
+// 建立磁碟索引的主進入點函式，由 `apps/build_disk_index.cpp` 呼叫。
+// 這個函式是整個磁碟索引建立流程的總指揮，它接收所有參數並呼叫其他輔助函式來完成：
+// 1. (如果需要) 分割資料
+// 2. 建立 Vamana 圖 (build_merged_vamana_index)
+// 3. 訓練 PQ 碼本
+// 4. 使用訓練好的碼本壓縮原始資料
+// 5. 組裝最終的磁碟索引檔案佈局 (create_disk_layout)
 template <typename T, typename LabelT = uint32_t>
 DISKANN_DLLEXPORT int build_disk_index(
     const char *dataFilePath, const char *indexFilePath, const char *indexBuildParameters,
@@ -100,6 +115,9 @@ DISKANN_DLLEXPORT int build_disk_index(
     const std::string &universal_label = "", const uint32_t filter_threshold = 0,
     const uint32_t Lf = 0); // default is empty string for no universal label
 
+// 建立最終的磁碟索引檔案佈局。
+// 這個函式會將 Vamana 圖檔案、壓縮後的向量資料檔案、以及可選的全精度重排序資料檔案，
+// 按照為了優化 I/O 模式而設計的特定佈局，合併成一個最終的索引檔案，以供 PQFlashIndex 載入。
 template <typename T>
 DISKANN_DLLEXPORT void create_disk_layout(const std::string base_file, const std::string mem_index_file,
                                           const std::string output_file,

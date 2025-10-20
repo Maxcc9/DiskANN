@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+// 本檔案為 `scratch.h` 中定義的暫存空間類別的實作。
+// 主要包含了這些類別的建構、解構和清理函式。
+
 #include <vector>
 #include <boost/dynamic_bitset.hpp>
 
@@ -9,9 +12,11 @@
 
 namespace diskann
 {
+
 //
-// Functions to manage scratch space for in-memory index based search
+// 記憶體內索引搜尋暫存空間的管理函式
 //
+
 template <typename T>
 InMemQueryScratch<T>::InMemQueryScratch(uint32_t search_l, uint32_t indexing_l, uint32_t r, uint32_t maxc, size_t dim,
                                         size_t aligned_dim, size_t alignment_factor, bool init_pq_scratch)
@@ -28,19 +33,24 @@ InMemQueryScratch<T>::InMemQueryScratch(uint32_t search_l, uint32_t indexing_l, 
     alloc_aligned(((void **)&this->_aligned_query_T), aligned_dim * sizeof(T), alignment_factor * sizeof(T));
     memset(this->_aligned_query_T, 0, aligned_dim * sizeof(T));
 
+    // 如果需要，初始化 PQ 相關的暫存空間
     if (init_pq_scratch)
         this->_pq_scratch = new PQScratch<T>(defaults::MAX_GRAPH_DEGREE, aligned_dim);
     else
         this->_pq_scratch = nullptr;
 
+    // 根據索引參數，為各個暫存向量預留空間，以避免在搜尋過程中重新分配記憶體
     _occlude_factor.reserve(maxc);
     _inserted_into_pool_bs = new boost::dynamic_bitset<>();
     _id_scratch.reserve((size_t)std::ceil(1.5 * defaults::GRAPH_SLACK_FACTOR * _R));
     _dist_scratch.reserve((size_t)std::ceil(1.5 * defaults::GRAPH_SLACK_FACTOR * _R));
 
+    // 根據搜尋和索引 L 值中較大者，初始化與 L 相關的資料結構
     resize_for_new_L(std::max(search_l, indexing_l));
 }
 
+// 清理暫存空間，為下一次查詢做準備
+// 注意：這裡只 `clear()` 內容，不清空已分配的記憶體容量 (capacity)，以供下次重複使用
 template <typename T> void InMemQueryScratch<T>::clear()
 {
     _pool.clear();
@@ -58,6 +68,7 @@ template <typename T> void InMemQueryScratch<T>::clear()
     _occlude_list_output.clear();
 }
 
+// 當查詢的 L (候選集大小) 大於目前暫存空間的設定時，擴展相關資料結構的容量
 template <typename T> void InMemQueryScratch<T>::resize_for_new_L(uint32_t new_l)
 {
     if (new_l > _L)
@@ -65,11 +76,11 @@ template <typename T> void InMemQueryScratch<T>::resize_for_new_L(uint32_t new_l
         _L = new_l;
         _pool.reserve(3 * _L + _R);
         _best_l_nodes.reserve(_L);
-
         _inserted_into_pool_rs.reserve(20 * _L);
     }
 }
 
+// 解構函式，釋放所有動態分配的記憶體
 template <typename T> InMemQueryScratch<T>::~InMemQueryScratch()
 {
     if (this->_aligned_query_T != nullptr)
@@ -83,8 +94,9 @@ template <typename T> InMemQueryScratch<T>::~InMemQueryScratch()
 }
 
 //
-// Functions to manage scratch space for SSD based search
+// SSD 索引搜尋暫存空間的管理函式
 //
+
 template <typename T> void SSDQueryScratch<T>::reset()
 {
     sector_idx = 0;
@@ -93,11 +105,14 @@ template <typename T> void SSDQueryScratch<T>::reset()
     full_retset.clear();
 }
 
+// SSD 暫存空間建構函式
 template <typename T> SSDQueryScratch<T>::SSDQueryScratch(size_t aligned_dim, size_t visited_reserve)
 {
     size_t coord_alloc_size = ROUND_UP(sizeof(T) * aligned_dim, 256);
 
+    // 分配用於儲存從磁碟讀取的向量的緩衝區
     diskann::alloc_aligned((void **)&coord_scratch, coord_alloc_size, 256);
+    // 分配用於儲存從磁碟讀取的原始磁區資料的緩衝區
     diskann::alloc_aligned((void **)&sector_scratch, defaults::MAX_N_SECTOR_READS * defaults::SECTOR_LEN,
                            defaults::SECTOR_LEN);
     diskann::alloc_aligned((void **)&this->_aligned_query_T, aligned_dim * sizeof(T), 8 * sizeof(T));
@@ -111,6 +126,7 @@ template <typename T> SSDQueryScratch<T>::SSDQueryScratch(size_t aligned_dim, si
     full_retset.reserve(visited_reserve);
 }
 
+// SSD 暫存空間解構函式
 template <typename T> SSDQueryScratch<T>::~SSDQueryScratch()
 {
     diskann::aligned_free((void *)coord_scratch);
@@ -120,6 +136,7 @@ template <typename T> SSDQueryScratch<T>::~SSDQueryScratch()
     delete this->_pq_scratch;
 }
 
+// SSD 執行緒資料建構函式
 template <typename T>
 SSDThreadData<T>::SSDThreadData(size_t aligned_dim, size_t visited_reserve) : scratch(aligned_dim, visited_reserve)
 {
@@ -130,19 +147,26 @@ template <typename T> void SSDThreadData<T>::clear()
     scratch.reset();
 }
 
+// PQ 相關暫存空間建構函式
 template <typename T> PQScratch<T>::PQScratch(size_t graph_degree, size_t aligned_dim)
 {
+    // 用於儲存鄰居的 PQ 碼
     diskann::alloc_aligned((void **)&aligned_pq_coord_scratch,
                            (size_t)graph_degree * (size_t)MAX_PQ_CHUNKS * sizeof(uint8_t), 256);
+    // 用於儲存預計算的查詢向量到碼本中心點的距離表
     diskann::alloc_aligned((void **)&aligned_pqtable_dist_scratch, 256 * (size_t)MAX_PQ_CHUNKS * sizeof(float), 256);
+    // 用於儲存最終計算出的 PQ 近似距離
     diskann::alloc_aligned((void **)&aligned_dist_scratch, (size_t)graph_degree * sizeof(float), 256);
+    // 用於儲存浮點數格式的查詢向量
     diskann::alloc_aligned((void **)&aligned_query_float, aligned_dim * sizeof(float), 8 * sizeof(float));
+    // 用於儲存 OPQ 旋轉後的查詢向量
     diskann::alloc_aligned((void **)&rotated_query, aligned_dim * sizeof(float), 8 * sizeof(float));
 
     memset(aligned_query_float, 0, aligned_dim * sizeof(float));
     memset(rotated_query, 0, aligned_dim * sizeof(float));
 }
 
+// PQ 相關暫存空間解構函式
 template <typename T> PQScratch<T>::~PQScratch()
 {
     diskann::aligned_free((void *)aligned_pq_coord_scratch);
@@ -152,6 +176,7 @@ template <typename T> PQScratch<T>::~PQScratch()
     diskann::aligned_free((void *)rotated_query);
 }
 
+// 初始化 PQ 暫存空間 (例如，正規化查詢向量)
 template <typename T> void PQScratch<T>::initialize(size_t dim, const T *query, const float norm)
 {
     for (size_t d = 0; d < dim; ++d)
@@ -163,6 +188,7 @@ template <typename T> void PQScratch<T>::initialize(size_t dim, const T *query, 
     }
 }
 
+// 模板實例化
 template DISKANN_DLLEXPORT class InMemQueryScratch<int8_t>;
 template DISKANN_DLLEXPORT class InMemQueryScratch<uint8_t>;
 template DISKANN_DLLEXPORT class InMemQueryScratch<float>;

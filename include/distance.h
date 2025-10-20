@@ -2,16 +2,21 @@
 #include "windows_customizations.h"
 #include <cstring>
 
+// 本檔案定義了各種距離/相似度度量的介面與實作。
+// 這是所有鄰近搜尋演算法的基礎。
+
 namespace diskann
 {
+// 定義支援的距離度量
 enum Metric
 {
-    L2 = 0,
-    INNER_PRODUCT = 1,
-    COSINE = 2,
-    FAST_L2 = 3
+    L2 = 0,            // L2 距離，即歐幾里得距離的平方
+    INNER_PRODUCT = 1, // 內積。注意：為了用於最小化搜尋，通常會返回負內積
+    COSINE = 2,        // 餘弦相似度
+    FAST_L2 = 3        // 快速 L2 計算，通常用於預先計算了範數的特殊情況
 };
 
+// 距離計算的抽象基底類別
 template <typename T> class Distance
 {
   public:
@@ -19,22 +24,21 @@ template <typename T> class Distance
     {
     }
 
-    // distance comparison function
+    // 核心比較函式，計算兩個向量 a 和 b 之間的距離。這是一個純虛擬函式，必須由子類別實作。
     DISKANN_DLLEXPORT virtual float compare(const T *a, const T *b, uint32_t length) const = 0;
 
-    // Needed only for COSINE-BYTE and INNER_PRODUCT-BYTE
+    // 僅用於位元組 (byte) 類型的 餘弦/內積 計算，需要傳入預先計算好的範數。
     DISKANN_DLLEXPORT virtual float compare(const T *a, const T *b, const float normA, const float normB,
                                             uint32_t length) const;
 
-    // For MIPS, normalization adds an extra dimension to the vectors.
-    // This function lets callers know if the normalization process
-    // changes the dimension.
+    // 對於某些度量 (如內積)，為了轉換成 L2 搜尋，可能會在正規化過程中增加維度。
+    // 這個函式返回正規化後的維度。
     DISKANN_DLLEXPORT virtual uint32_t post_normalization_dimension(uint32_t orig_dimension) const;
 
+    // 取得目前的度量類型。
     DISKANN_DLLEXPORT virtual diskann::Metric get_metric() const;
 
-    // This is for efficiency. If no normalization is required, the callers
-    // can simply ignore the normalize_data_for_build() function.
+    // 指示是否需要在建立索引前對基底資料進行預處理 (例如，正規化)。
     DISKANN_DLLEXPORT virtual bool preprocessing_required() const;
 
     // Check the preprocessing_required() function before calling this.
@@ -50,20 +54,12 @@ template <typename T> class Distance
     DISKANN_DLLEXPORT virtual void preprocess_base_points(T *original_data, const size_t orig_dim,
                                                           const size_t num_points);
 
-    // Invokes normalization for a single vector during search. The scratch space
-    // has to be created by the caller keeping track of the fact that
-    // normalization might change the dimension of the query vector.
+    // 對單一的查詢向量進行預處理。
     DISKANN_DLLEXPORT virtual void preprocess_query(const T *query_vec, const size_t query_dim, T *scratch_query);
 
-    // If an algorithm has a requirement that some data be aligned to a certain
-    // boundary it can use this function to indicate that requirement. Currently,
-    // we are setting it to 8 because that works well for AVX2. If we have AVX512
-    // implementations of distance algos, they might have to set this to 16
-    // (depending on how they are implemented)
+    // 取得為了 SIMD 優化所需的記憶體對齊位元組數。
     DISKANN_DLLEXPORT virtual size_t get_required_alignment() const;
 
-    // Providing a default implementation for the virtual destructor because we
-    // don't expect most metric implementations to need it.
     DISKANN_DLLEXPORT virtual ~Distance() = default;
 
   protected:
@@ -71,6 +67,9 @@ template <typename T> class Distance
     size_t _alignment_factor = 8;
 };
 
+// --- 以下為各種距離度量的具體實作 ---
+
+// 餘弦距離 (int8_t 版本)
 class DistanceCosineInt8 : public Distance<int8_t>
 {
   public:
@@ -80,6 +79,7 @@ class DistanceCosineInt8 : public Distance<int8_t>
     DISKANN_DLLEXPORT virtual float compare(const int8_t *a, const int8_t *b, uint32_t length) const;
 };
 
+// L2 距離 (int8_t 版本)
 class DistanceL2Int8 : public Distance<int8_t>
 {
   public:
@@ -89,7 +89,7 @@ class DistanceL2Int8 : public Distance<int8_t>
     DISKANN_DLLEXPORT virtual float compare(const int8_t *a, const int8_t *b, uint32_t size) const;
 };
 
-// AVX implementations. Borrowed from HNSW code.
+// 使用 AVX2 指令集優化的 L2 距離 (int8_t 版本)
 class AVXDistanceL2Int8 : public Distance<int8_t>
 {
   public:
@@ -99,6 +99,7 @@ class AVXDistanceL2Int8 : public Distance<int8_t>
     DISKANN_DLLEXPORT virtual float compare(const int8_t *a, const int8_t *b, uint32_t length) const;
 };
 
+// 餘弦距離 (float 版本)
 class DistanceCosineFloat : public Distance<float>
 {
   public:
@@ -108,6 +109,7 @@ class DistanceCosineFloat : public Distance<float>
     DISKANN_DLLEXPORT virtual float compare(const float *a, const float *b, uint32_t length) const;
 };
 
+// L2 距離 (float 版本)
 class DistanceL2Float : public Distance<float>
 {
   public:
@@ -118,10 +120,12 @@ class DistanceL2Float : public Distance<float>
 #ifdef _WINDOWS
     DISKANN_DLLEXPORT virtual float compare(const float *a, const float *b, uint32_t size) const;
 #else
+    // 標記為熱點函式以供編譯器優化
     DISKANN_DLLEXPORT virtual float compare(const float *a, const float *b, uint32_t size) const __attribute__((hot));
 #endif
 };
 
+// 使用 AVX 指令集優化的 L2 距離 (float 版本)
 class AVXDistanceL2Float : public Distance<float>
 {
   public:
@@ -131,6 +135,7 @@ class AVXDistanceL2Float : public Distance<float>
     DISKANN_DLLEXPORT virtual float compare(const float *a, const float *b, uint32_t length) const;
 };
 
+// 慢速、通用的 L2 距離實作，主要用於比對或無 SIMD 優化時的備用方案
 template <typename T> class SlowDistanceL2 : public Distance<T>
 {
   public:
@@ -140,6 +145,7 @@ template <typename T> class SlowDistanceL2 : public Distance<T>
     DISKANN_DLLEXPORT virtual float compare(const T *a, const T *b, uint32_t length) const;
 };
 
+// 慢速 餘弦距離 (uint8_t 版本)
 class SlowDistanceCosineUInt8 : public Distance<uint8_t>
 {
   public:
@@ -149,6 +155,7 @@ class SlowDistanceCosineUInt8 : public Distance<uint8_t>
     DISKANN_DLLEXPORT virtual float compare(const uint8_t *a, const uint8_t *b, uint32_t length) const;
 };
 
+// L2 距離 (uint8_t 版本)
 class DistanceL2UInt8 : public Distance<uint8_t>
 {
   public:
@@ -158,6 +165,7 @@ class DistanceL2UInt8 : public Distance<uint8_t>
     DISKANN_DLLEXPORT virtual float compare(const uint8_t *a, const uint8_t *b, uint32_t size) const;
 };
 
+// 內積距離 (通用範本版本)
 template <typename T> class DistanceInnerProduct : public Distance<T>
 {
   public:
@@ -170,6 +178,7 @@ template <typename T> class DistanceInnerProduct : public Distance<T>
     }
     inline float inner_product(const T *a, const T *b, unsigned size) const;
 
+    // 為了將最大內積問題轉換為最小距離問題，返回內積的相反數。
     inline float compare(const T *a, const T *b, unsigned size) const
     {
         float result = inner_product(a, b, size);
@@ -180,10 +189,9 @@ template <typename T> class DistanceInnerProduct : public Distance<T>
     }
 };
 
+// 快速 L2 距離，通常用於已預先計算範數的情況
 template <typename T> class DistanceFastL2 : public DistanceInnerProduct<T>
 {
-    // currently defined only for float.
-    // templated for future use.
   public:
     DistanceFastL2() : DistanceInnerProduct<T>(diskann::Metric::FAST_L2)
     {
@@ -192,6 +200,7 @@ template <typename T> class DistanceFastL2 : public DistanceInnerProduct<T>
     float compare(const T *a, const T *b, float norm, unsigned size) const;
 };
 
+// 使用 AVX 指令集優化的內積 (float 版本)
 class AVXDistanceInnerProductFloat : public Distance<float>
 {
   public:
@@ -201,6 +210,8 @@ class AVXDistanceInnerProductFloat : public Distance<float>
     DISKANN_DLLEXPORT virtual float compare(const float *a, const float *b, uint32_t length) const;
 };
 
+// 使用 AVX 指令集優化的正規化 코사인距離 (float 版本)
+// 透過先將向量正規化，然後計算內積來實現 코사인相似度，這是一種常見的優化技巧。
 class AVXNormalizedCosineDistanceFloat : public Distance<float>
 {
   private:
@@ -213,10 +224,9 @@ class AVXNormalizedCosineDistanceFloat : public Distance<float>
     AVXNormalizedCosineDistanceFloat() : Distance<float>(diskann::Metric::COSINE)
     {
     }
+    // 餘弦距離 = 1 - 餘弦相似度 = 1 - (正規化後的內積)
     DISKANN_DLLEXPORT virtual float compare(const float *a, const float *b, uint32_t length) const
     {
-        // Inner product returns negative values to indicate distance.
-        // This will ensure that cosine is between -1 and 1.
         return 1.0f + _innerProduct.compare(a, b, length);
     }
     DISKANN_DLLEXPORT virtual uint32_t post_normalization_dimension(uint32_t orig_dimension) const override;
@@ -230,6 +240,7 @@ class AVXNormalizedCosineDistanceFloat : public Distance<float>
                                                     float *scratch_query_vector) override;
 };
 
+// 工廠函式：根據傳入的度量類型 m，返回對應的 Distance 物件實例。
 template <typename T> Distance<T> *get_distance_function(Metric m);
 
 } // namespace diskann

@@ -1,15 +1,21 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+// 本檔案為 `InMemGraphStore` 類別的實作。
+// 它處理在主記憶體中圖的鄰接串列的建立、儲存、載入和存取。
+
 #include "in_mem_graph_store.h"
 #include "utils.h"
 
 namespace diskann
 {
+// 建構函式
 InMemGraphStore::InMemGraphStore(const size_t total_pts, const size_t reserve_graph_degree)
     : AbstractGraphStore(total_pts, reserve_graph_degree)
 {
+    // 調整主向量的大小以容納所有節點
     this->resize_graph(total_pts);
+    // 為每個節點的鄰居列表預留空間，以避免在建立索引時頻繁地重新分配記憶體
     for (size_t i = 0; i < total_pts; i++)
     {
         _graph[i].reserve(reserve_graph_degree);
@@ -26,38 +32,48 @@ int InMemGraphStore::store(const std::string &index_path_prefix, const size_t nu
 {
     return save_graph(index_path_prefix, num_points, num_frozen_points, start);
 }
+
+// 取得節點 i 的鄰居列表 (唯讀)
 const std::vector<location_t> &InMemGraphStore::get_neighbours(const location_t i) const
 {
     return _graph.at(i);
 }
 
+// 為節點 i 新增一個鄰居
 void InMemGraphStore::add_neighbour(const location_t i, location_t neighbour_id)
 {
     _graph[i].emplace_back(neighbour_id);
+    // 更新觀察到的最大出度
     if (_max_observed_degree < _graph[i].size())
     {
         _max_observed_degree = (uint32_t)(_graph[i].size());
     }
 }
 
+// 清空節點 i 的所有鄰居
 void InMemGraphStore::clear_neighbours(const location_t i)
 {
     _graph[i].clear();
 };
+
+// 交換兩個節點 a 和 b 的鄰居列表
 void InMemGraphStore::swap_neighbours(const location_t a, location_t b)
 {
     _graph[a].swap(_graph[b]);
 };
 
+// 將節點 i 的鄰居列表設定為一個新的列表
 void InMemGraphStore::set_neighbours(const location_t i, std::vector<location_t> &neighbours)
 {
     _graph[i].assign(neighbours.begin(), neighbours.end());
+    // 更新觀察到的最大出度
     if (_max_observed_degree < neighbours.size())
     {
         _max_observed_degree = (uint32_t)(neighbours.size());
     }
 }
 
+// 調整圖的容量以容納新的大小
 size_t InMemGraphStore::resize_graph(const size_t new_size)
 {
     _graph.resize(new_size);
@@ -65,6 +81,7 @@ size_t InMemGraphStore::resize_graph(const size_t new_size)
     return _graph.size();
 }
 
+// 清空整個圖結構
 void InMemGraphStore::clear_graph()
 {
     _graph.clear();
@@ -132,49 +149,52 @@ std::tuple<uint32_t, uint32_t, size_t> InMemGraphStore::load_impl(AlignedFileRea
 }
 #endif
 
+// 從檔案載入圖結構的實作
 std::tuple<uint32_t, uint32_t, size_t> InMemGraphStore::load_impl(const std::string &filename,
                                                                   size_t expected_num_points)
 {
     size_t expected_file_size;
     size_t file_frozen_pts;
     uint32_t start;
-    size_t file_offset = 0; // will need this for single file format support
+    size_t file_offset = 0; 
 
     std::ifstream in;
     in.exceptions(std::ios::badbit | std::ios::failbit);
     in.open(filename, std::ios::binary);
     in.seekg(file_offset, in.beg);
+
+    // 讀取圖檔案的標頭，包含元資料
     in.read((char *)&expected_file_size, sizeof(size_t));
     in.read((char *)&_max_observed_degree, sizeof(uint32_t));
     in.read((char *)&start, sizeof(uint32_t));
     in.read((char *)&file_frozen_pts, sizeof(size_t));
     size_t vamana_metadata_size = sizeof(size_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(size_t);
 
-    diskann::cout << "From graph header, expected_file_size: " << expected_file_size
-                  << ", _max_observed_degree: " << _max_observed_degree << ", _start: " << start
-                  << ", file_frozen_pts: " << file_frozen_pts << std::endl;
+    diskann::cout << "從圖標頭讀取, 預期檔案大小: " << expected_file_size
+                  << ", 最大觀察出度: " << _max_observed_degree << ", 起始點: " << start
+                  << ", 檔案中的凍結點數: " << file_frozen_pts << std::endl;
 
-    diskann::cout << "Loading vamana graph " << filename << "..." << std::flush;
+    diskann::cout << "正在載入 Vamana 圖 " << filename << "..." << std::flush;
 
-    // If user provides more points than max_points
-    // resize the _graph to the larger size.
+    // 如果預期的點數量大於目前容量，則擴展圖
     if (get_total_points() < expected_num_points)
     {
-        diskann::cout << "resizing graph to " << expected_num_points << std::endl;
+        diskann::cout << "擴展圖容量至 " << expected_num_points << std::endl;
         this->resize_graph(expected_num_points);
     }
 
     size_t bytes_read = vamana_metadata_size;
-    size_t cc = 0;
+    size_t cc = 0; // 總邊數計數器
     uint32_t nodes_read = 0;
+    // 逐一讀取每個節點的鄰居列表
     while (bytes_read != expected_file_size)
     {
-        uint32_t k;
+        uint32_t k; // 目前節點的鄰居數量
         in.read((char *)&k, sizeof(uint32_t));
 
         if (k == 0)
         {
-            diskann::cerr << "ERROR: Point found with no out-neighbours, point#" << nodes_read << std::endl;
+            diskann::cerr << "錯誤: 發現沒有出邊的點, 點編號#" << nodes_read << std::endl;
         }
 
         cc += k;
@@ -192,11 +212,12 @@ std::tuple<uint32_t, uint32_t, size_t> InMemGraphStore::load_impl(const std::str
         }
     }
 
-    diskann::cout << "done. Index has " << nodes_read << " nodes and " << cc << " out-edges, _start is set to " << start
+    diskann::cout << "完成。索引有 " << nodes_read << " 個節點和 " << cc << " 條出邊，起始點設定為 " << start
                   << std::endl;
     return std::make_tuple(nodes_read, start, file_frozen_pts);
 }
 
+// 儲存圖結構到檔案
 int InMemGraphStore::save_graph(const std::string &index_path_prefix, const size_t num_points,
                                 const size_t num_frozen_points, const uint32_t start)
 {
@@ -205,23 +226,27 @@ int InMemGraphStore::save_graph(const std::string &index_path_prefix, const size
 
     size_t file_offset = 0;
     out.seekp(file_offset, out.beg);
-    size_t index_size = 24;
+    size_t index_size = 24; // 初始標頭大小
     uint32_t max_degree = 0;
+
+    // 先寫入一個預估的標頭
     out.write((char *)&index_size, sizeof(uint64_t));
     out.write((char *)&_max_observed_degree, sizeof(uint32_t));
     uint32_t ep_u32 = start;
     out.write((char *)&ep_u32, sizeof(uint32_t));
     out.write((char *)&num_frozen_points, sizeof(size_t));
 
-    // Note: num_points = _nd + _num_frozen_points
+    // 逐一寫入每個節點的鄰居列表
     for (uint32_t i = 0; i < num_points; i++)
     {
-        uint32_t GK = (uint32_t)_graph[i].size();
+        uint32_t GK = (uint32_t)_graph[i].size(); // 鄰居數量
         out.write((char *)&GK, sizeof(uint32_t));
         out.write((char *)_graph[i].data(), GK * sizeof(uint32_t));
         max_degree = _graph[i].size() > max_degree ? (uint32_t)_graph[i].size() : max_degree;
         index_size += (size_t)(sizeof(uint32_t) * (GK + 1));
     }
+
+    // 回到檔案開頭，寫入最終計算出的正確檔案大小和最大出度
     out.seekp(file_offset, out.beg);
     out.write((char *)&index_size, sizeof(uint64_t));
     out.write((char *)&max_degree, sizeof(uint32_t));

@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+// 本檔案是一個範例應用程式，展示如何載入一個已建立的記憶體內 DiskANN 索引，
+// 並使用它來執行 K-近鄰搜尋。它還會計算搜尋的 QPS (每秒查詢數)、延遲和召回率。
+
 #include <cstring>
 #include <iomanip>
 #include <algorithm>
@@ -25,6 +28,7 @@
 
 namespace po = boost::program_options;
 
+// 搜尋函式的主體，被 main 函式呼叫
 template <typename T, typename LabelT = uint32_t>
 int search_memory_index(diskann::Metric &metric, const std::string &index_path, const std::string &result_path_prefix,
                         const std::string &query_file, const std::string &truthset_file, const uint32_t num_threads,
@@ -33,7 +37,8 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
                         const std::vector<std::string> &query_filters, const float fail_if_recall_below)
 {
     using TagT = uint32_t;
-    // Load the query file
+    
+    // --- 載入查詢資料和真實結果 (ground truth) ---
     T *query = nullptr;
     uint32_t *gt_ids = nullptr;
     float *gt_dists = nullptr;
@@ -70,6 +75,8 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
 
     const size_t num_frozen_pts = diskann::get_graph_num_frozen_points(index_path);
 
+    // 2. 建立一個與要載入的索引相符的 IndexConfig
+    //    注意：max_points 設為 0，因為實際大小將從載入的檔案中確定。
     auto config = diskann::IndexConfigBuilder()
                       .with_metric(metric)
                       .with_dimension(query_dim)
@@ -88,11 +95,15 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
                       .with_num_frozen_pts(num_frozen_pts)
                       .build();
 
+    // 3. 使用工廠模式建立一個空的 Index 物件
     auto index_factory = diskann::IndexFactory(config);
     auto index = index_factory.create_instance();
+
+    // 4. 呼叫 load() 方法，將磁碟上的圖和資料檔案讀入記憶體
     index->load(index_path.c_str(), num_threads, *(std::max_element(Lvec.begin(), Lvec.end())));
     std::cout << "Index loaded" << std::endl;
 
+    // 如果是 FAST_L2 度量，優化索引佈局以加速搜尋
     if (metric == diskann::FAST_L2)
         index->optimize_index_layout();
 
@@ -144,10 +155,12 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
 
     double best_recall = 0.0;
 
+    // --- 執行搜尋 ---
+    // 遍歷使用者提供的所有 L (搜尋候選集大小) 參數
     for (uint32_t test_id = 0; test_id < Lvec.size(); test_id++)
     {
         uint32_t L = Lvec[test_id];
-        if (L < recall_at)
+        if (L < recall_at) // K
         {
             diskann::cout << "Ignoring search with L:" << L << " since it's smaller than K:" << recall_at << std::endl;
             continue;
@@ -156,9 +169,11 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
         query_result_ids[test_id].resize(recall_at * query_num);
         query_result_dists[test_id].resize(recall_at * query_num);
         std::vector<T *> res = std::vector<T *>();
-
+        
         auto s = std::chrono::high_resolution_clock::now();
         omp_set_num_threads(num_threads);
+
+        // 使用 OpenMP 平行處理所有查詢
 #pragma omp parallel for schedule(dynamic, 1)
         for (int64_t i = 0; i < (int64_t)query_num; i++)
         {
@@ -199,14 +214,14 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
             }
             else
             {
-                cmp_stats[i] = index
-                                   ->search(query + i * query_aligned_dim, recall_at, L,
-                                            query_result_ids[test_id].data() + i * recall_at)
-                                   .second;
+            cmp_stats[i] = index
+                               ->search(query + i * query_aligned_dim, recall_at, L,
+                                        query_result_ids[test_id].data() + i * recall_at)
+                               .second;
             }
             auto qe = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double> diff = qe - qs;
-            latency_stats[i] = (float)(diff.count() * 1000000);
+            latency_stats[i] = (float)(diff.count() * 1000000); // 記錄延遲 (微秒)
         }
         std::chrono::duration<double> diff = std::chrono::high_resolution_clock::now() - s;
 
@@ -221,8 +236,8 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
             recalls.reserve(recalls_to_print);
             for (uint32_t curr_recall = first_recall; curr_recall <= recall_at; curr_recall++)
             {
-                recalls.push_back(diskann::calculate_recall((uint32_t)query_num, gt_ids, gt_dists, (uint32_t)gt_dim,
-                                                            query_result_ids[test_id].data(), recall_at, curr_recall));
+            recalls.push_back(diskann::calculate_recall((uint32_t)query_num, gt_ids, gt_dists, (uint32_t)gt_dim,
+                                                        query_result_ids[test_id].data(), recall_at, curr_recall));
             }
         }
 
@@ -277,6 +292,7 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
 
 int main(int argc, char **argv)
 {
+    // --- 參數定義 ---
     std::string data_type, dist_fn, index_path_prefix, result_path, query_file, gt_file, filter_label, label_type,
         query_filters_file;
     uint32_t num_threads, K;
@@ -418,19 +434,19 @@ int main(int argc, char **argv)
         if (!query_filters.empty() && label_type == "ushort")
         {
             if (data_type == std::string("int8"))
-            {
+        {
                 return search_memory_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path, query_file, gt_file, num_threads, K, print_all_recalls,
                     Lvec, dynamic, tags, show_qps_per_thread, query_filters, fail_if_recall_below);
-            }
-            else if (data_type == std::string("uint8"))
-            {
+        }
+        else if (data_type == std::string("uint8"))
+        {
                 return search_memory_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path, query_file, gt_file, num_threads, K, print_all_recalls,
                     Lvec, dynamic, tags, show_qps_per_thread, query_filters, fail_if_recall_below);
-            }
-            else if (data_type == std::string("float"))
-            {
+        }
+        else if (data_type == std::string("float"))
+        {
                 return search_memory_index<float, uint16_t>(metric, index_path_prefix, result_path, query_file, gt_file,
                                                             num_threads, K, print_all_recalls, Lvec, dynamic, tags,
                                                             show_qps_per_thread, query_filters, fail_if_recall_below);
@@ -464,7 +480,7 @@ int main(int argc, char **argv)
             else
             {
                 std::cout << "Unsupported type. Use float/int8/uint8" << std::endl;
-                return -1;
+            return -1;
             }
         }
     }
