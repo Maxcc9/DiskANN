@@ -36,7 +36,7 @@ void print_stats(std::string category, std::vector<float> percentiles, std::vect
     diskann::cout << std::setw(20) << category << ": " << std::flush;
     for (uint32_t s = 0; s < percentiles.size(); s++)
     {
-        diskann::cout << std::setw(8) << percentiles[s] << "%";
+        diskann::cout << std::setw(8) << percentiles[s] << "%\n";
     }
     diskann::cout << std::endl;
     diskann::cout << std::setw(22) << " " << std::flush;
@@ -53,7 +53,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       const uint32_t num_threads, const uint32_t recall_at, const uint32_t beamwidth,
                       const uint32_t num_nodes_to_cache, const uint32_t search_io_limit,
                       const std::vector<uint32_t> &Lvec, const float fail_if_recall_below,
-                      const std::vector<std::string> &query_filters, const bool use_reorder_data = false)
+                      const std::vector<std::string> &query_filters, const float lambda, const bool use_reorder_data = false)
 {
     diskann::cout << "Search parameters: #threads: " << num_threads << ", ";
     if (beamwidth <= 0)
@@ -61,9 +61,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     else
         diskann::cout << " beamwidth: " << beamwidth << std::flush;
     if (search_io_limit == std::numeric_limits<uint32_t>::max())
-        diskann::cout << "." << std::endl;
+        diskann::cout << ".\n";
     else
-        diskann::cout << ", io_limit: " << search_io_limit << "." << std::endl;
+        diskann::cout << ", io_limit: " << search_io_limit << ".\n";
 
     std::string warmup_query_file = index_path_prefix + "_sample_data.bin";
 
@@ -81,7 +81,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         if (query_filters.size() != 1 && query_filters.size() != query_num)
         {
             std::cout << "Error. Mismatch in number of queries and size of query "
-                         "filters file"
+                         " filters file"
                       << std::endl;
             return -1; // To return -1 or some other error handling?
         }
@@ -232,13 +232,13 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                 _pFlashIndex->cached_beam_search(query + (i * query_aligned_dim), recall_at, L,
                                                  query_result_ids_64.data() + (i * recall_at),
                                                  query_result_dists[test_id].data() + (i * recall_at),
-                                                 optimized_beamwidth, use_reorder_data, stats + i);
+                                                 optimized_beamwidth, search_io_limit, use_reorder_data, lambda, stats + i);
             }
             else
             {
                 LabelT label_for_search;
-                if (query_filters.size() == 1)
-                { // one label for all queries
+                if (query_filters.size() == 1) // one label for all queries
+                {
                     label_for_search = _pFlashIndex->get_converted_label(query_filters[0]);
                 }
                 else
@@ -248,7 +248,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                 _pFlashIndex->cached_beam_search(
                     query + (i * query_aligned_dim), recall_at, L, query_result_ids_64.data() + (i * recall_at),
                     query_result_dists[test_id].data() + (i * recall_at), optimized_beamwidth, true, label_for_search,
-                    use_reorder_data, stats + i);
+                    search_io_limit, use_reorder_data, lambda, stats + i);
             }
         }
         auto e = std::chrono::high_resolution_clock::now();
@@ -321,6 +321,7 @@ int main(int argc, char **argv)
     std::vector<uint32_t> Lvec;
     bool use_reorder_data = false;
     float fail_if_recall_below = 0.0f;
+    float lambda;
 
     po::options_description desc{
         program_options_utils::make_program_description("search_disk_index", "Searches on-disk DiskANN indexes")};
@@ -357,7 +358,7 @@ int main(int argc, char **argv)
         optional_configs.add_options()(
             "search_io_limit",
             po::value<uint32_t>(&search_io_limit)->default_value(std::numeric_limits<uint32_t>::max()),
-            "Max #IOs for search.  Default value: uint32::max()");
+            "Max #IOs for search.  Default value: uint32::max()\n");
         optional_configs.add_options()("num_threads,T",
                                        po::value<uint32_t>(&num_threads)->default_value(omp_get_num_procs()),
                                        program_options_utils::NUMBER_THREADS_DESCRIPTION);
@@ -375,6 +376,8 @@ int main(int argc, char **argv)
         optional_configs.add_options()("fail_if_recall_below",
                                        po::value<float>(&fail_if_recall_below)->default_value(0.0f),
                                        program_options_utils::FAIL_IF_RECALL_BELOW);
+        optional_configs.add_options()("lambda", po::value<float>(&lambda)->default_value(0.3f),
+                                       "Penalty strength for I/O-aware traversal (default 0.3).\n");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -387,7 +390,7 @@ int main(int argc, char **argv)
             return 0;
         }
         po::notify(vm);
-        if (vm["use_reorder_data"].as<bool>())
+        if (vm["use_reorder_data"].as<bool>()) 
             use_reorder_data = true;
     }
     catch (const std::exception &ex)
@@ -412,8 +415,7 @@ int main(int argc, char **argv)
     else
     {
         std::cout << "Unsupported distance function. Currently only L2/ Inner "
-                     "Product/Cosine are supported."
-                  << std::endl;
+                     "Product/Cosine are supported." << std::endl;
         return -1;
     }
 
@@ -426,8 +428,7 @@ int main(int argc, char **argv)
     if (use_reorder_data && data_type != std::string("float"))
     {
         std::cout << "Error: Reorder data for reordering currently only "
-                     "supported for float data type."
-                  << std::endl;
+                     "supported for float data type." << std::endl;
         return -1;
     }
 
@@ -454,15 +455,15 @@ int main(int argc, char **argv)
             if (data_type == std::string("float"))
                 return search_disk_index<float, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, lambda, use_reorder_data);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, lambda, use_reorder_data);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, lambda, use_reorder_data);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;
@@ -474,15 +475,15 @@ int main(int argc, char **argv)
             if (data_type == std::string("float"))
                 return search_disk_index<float>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                 num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                fail_if_recall_below, query_filters, use_reorder_data);
+                                                fail_if_recall_below, query_filters, lambda, use_reorder_data);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                  num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                 fail_if_recall_below, query_filters, use_reorder_data);
+                                                 fail_if_recall_below, query_filters, lambda, use_reorder_data);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                   num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                  fail_if_recall_below, query_filters, use_reorder_data);
+                                                  fail_if_recall_below, query_filters, lambda, use_reorder_data);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;

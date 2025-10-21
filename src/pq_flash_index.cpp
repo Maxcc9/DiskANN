@@ -1237,31 +1237,31 @@ bool getNextCompletedRequest(std::shared_ptr<AlignedFileReader> &reader, IOConte
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
-                                                 const bool use_reorder_data, QueryStats *stats)
+                                                 const bool use_reorder_data, const float lambda, QueryStats *stats)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, std::numeric_limits<uint32_t>::max(),
-                       use_reorder_data, stats);
+                       use_reorder_data, lambda, stats);
 }
 
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const bool use_filter, const LabelT &filter_label,
-                                                 const bool use_reorder_data, QueryStats *stats)
+                                                 const bool use_reorder_data, const float lambda, QueryStats *stats)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, use_filter, filter_label,
-                       std::numeric_limits<uint32_t>::max(), use_reorder_data, stats);
+                       std::numeric_limits<uint32_t>::max(), use_reorder_data, lambda, stats);
 }
 
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const uint32_t io_limit, const bool use_reorder_data,
-                                                 QueryStats *stats)
+                                                 const float lambda, QueryStats *stats)
 {
     LabelT dummy_filter = 0;
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, false, dummy_filter, io_limit,
-                       use_reorder_data, stats);
+                       use_reorder_data, lambda, stats);
 }
 
 template <typename T, typename LabelT>
@@ -1269,7 +1269,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const bool use_filter, const LabelT &filter_label,
                                                  const uint32_t io_limit, const bool use_reorder_data,
-                                                 QueryStats *stats)
+                                                 const float lambda, QueryStats *stats)
 {
 
     uint64_t num_sector_per_nodes = DIV_ROUND_UP(_max_node_len, defaults::SECTOR_LEN);
@@ -1527,7 +1527,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                         (!_use_universal_label || !point_has_label(id, _universal_filter_label)))
                         continue;
                     cmps++;
-                    float dist = dist_scratch[m];
+                    float dist = get_penalized_distance(id, dist_scratch[m], lambda, ctx);
                     Neighbor nn(id, dist);
                     retset.insert(nn);
                 }
@@ -1590,7 +1590,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                         (!_use_universal_label || !point_has_label(id, _universal_filter_label)))
                         continue;
                     cmps++;
-                    float dist = dist_scratch[m];
+                    float dist = get_penalized_distance(id, dist_scratch[m], lambda, ctx);
                     if (stats != nullptr)
                     {
                         stats->n_cmps++;
@@ -1720,7 +1720,7 @@ uint32_t PQFlashIndex<T, LabelT>::range_search(const T *query1, const double ran
         cur_bw = (cur_bw > 100) ? 100 : cur_bw;
         for (auto &x : distances)
             x = std::numeric_limits<float>::max();
-        this->cached_beam_search(query1, l_search, l_search, indices.data(), distances.data(), cur_bw, false, stats);
+        this->cached_beam_search(query1, l_search, l_search, indices.data(), distances.data(), cur_bw, false, 0.0f, stats);
         for (uint32_t i = 0; i < l_search; i++)
         {
             if (distances[i] > (float)range)
@@ -1782,10 +1782,46 @@ template <typename T, typename LabelT> std::uint64_t PQFlashIndex<T, LabelT>::ge
     return _num_points;
 }
 
+template <typename T, typename LabelT>
+float PQFlashIndex<T, LabelT>::get_penalized_distance(const uint32_t candidate_id, const float original_dist, const float lambda, IOContext &ctx) {
+    if (lambda == 0.0f) {
+        return original_dist;
+    }
+
+    auto iter = _nhood_cache.find(candidate_id);
+    // If candidate is not in cache, we penalize it with the max penalty.
+    if (iter == _nhood_cache.end()) {
+        return original_dist * (1.0f + lambda);
+    }
+
+    // If candidate is in cache, we calculate the penalty based on its neighbors' cache status.
+    uint32_t grandchildren_count = iter->second.first;
+    uint32_t* grandchildren_ids = iter->second.second;
+
+    if (grandchildren_count == 0) {
+        return original_dist;
+    }
+
+    uint32_t n_missing = 0;
+    for (uint32_t i = 0; i < grandchildren_count; ++i) {
+        if (_nhood_cache.find(grandchildren_ids[i]) == _nhood_cache.end()) {
+            n_missing++;
+        }
+    }
+
+    if (grandchildren_count > 0) {
+        return original_dist * (1.0f + lambda * ( (float)n_missing / (float)grandchildren_count ));
+    } else {
+        return original_dist;
+    }
+}
+
+
 // instantiations
 template class PQFlashIndex<uint8_t>;
 template class PQFlashIndex<int8_t>;
 template class PQFlashIndex<float>;
+
 template class PQFlashIndex<uint8_t, uint16_t>;
 template class PQFlashIndex<int8_t, uint16_t>;
 template class PQFlashIndex<float, uint16_t>;
