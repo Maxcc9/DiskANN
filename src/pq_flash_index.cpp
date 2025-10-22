@@ -1783,39 +1783,54 @@ template <typename T, typename LabelT> std::uint64_t PQFlashIndex<T, LabelT>::ge
 }
 
 template <typename T, typename LabelT>
-float PQFlashIndex<T, LabelT>::get_penalized_distance(const uint32_t candidate_id, const float original_dist, const float lambda, IOContext &ctx) {
-    if (lambda == 0.0f) {
+float PQFlashIndex<T, LabelT>::get_penalized_distance(const uint32_t candidate_id, const float original_dist,
+                                                      const float lambda, IOContext &ctx)
+{
+    if (lambda == 0.0f)
+    {
         return original_dist;
     }
 
     auto iter = _nhood_cache.find(candidate_id);
-    // If candidate is not in cache, we penalize it with the max penalty.
-    if (iter == _nhood_cache.end()) {
-        return original_dist * (1.0f + lambda);
+    float miss_fraction = 0.0f;
+    if (iter == _nhood_cache.end())
+    {
+        miss_fraction = 1.0f;
     }
-
-    // If candidate is in cache, we calculate the penalty based on its neighbors' cache status.
-    uint32_t grandchildren_count = iter->second.first;
-    uint32_t* grandchildren_ids = iter->second.second;
-
-    if (grandchildren_count == 0) {
-        return original_dist;
-    }
-
-    uint32_t n_missing = 0;
-    for (uint32_t i = 0; i < grandchildren_count; ++i) {
-        if (_nhood_cache.find(grandchildren_ids[i]) == _nhood_cache.end()) {
-            n_missing++;
+    else
+    {
+        uint32_t grandchildren_count = iter->second.first;
+        uint32_t *grandchildren_ids = iter->second.second;
+        if (grandchildren_count != 0)
+        {
+            uint32_t n_missing = 0;
+            for (uint32_t i = 0; i < grandchildren_count; ++i)
+            {
+                if (_nhood_cache.find(grandchildren_ids[i]) == _nhood_cache.end())
+                {
+                    n_missing++;
+                }
+            }
+            miss_fraction = static_cast<float>(n_missing) / static_cast<float>(grandchildren_count);
         }
     }
 
-    if (grandchildren_count > 0) {
-        return original_dist * (1.0f + lambda * ( (float)n_missing / (float)grandchildren_count ));
-    } else {
+    if (miss_fraction <= 0.0f)
+    {
         return original_dist;
     }
-}
 
+    const float penalty_factor = 1.0f + lambda * miss_fraction;
+
+    if (metric == diskann::Metric::INNER_PRODUCT && original_dist < 0.0f)
+    {
+        return original_dist / penalty_factor;
+    }
+    else
+    {
+        return original_dist * penalty_factor;
+    }
+}
 
 // instantiations
 template class PQFlashIndex<uint8_t>;
