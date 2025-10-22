@@ -177,12 +177,13 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     diskann::cout.precision(2);
 
     std::string recall_string = "Recall@" + std::to_string(recall_at);
+    std::string recall_at_1_string = "Recall@1";
     diskann::cout << std::setw(6) << "L" << std::setw(12) << "Beamwidth" << std::setw(16) << "QPS" << std::setw(16)
                   << "Mean Latency" << std::setw(16) << "99.9 Latency" << std::setw(16) << "Mean IOs" << std::setw(16)
                   << "Mean IO (us)" << std::setw(16) << "CPU (s)";
     if (calc_recall_flag)
     {
-        diskann::cout << std::setw(16) << recall_string << std::endl;
+        diskann::cout << std::setw(16) << recall_string << std::setw(16) << recall_at_1_string << std::endl;
     }
     else
         diskann::cout << std::endl;
@@ -196,6 +197,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     uint32_t optimized_beamwidth = 2;
 
     double best_recall = 0.0;
+    double best_recall_at_1 = 0.0;
 
     for (uint32_t test_id = 0; test_id < Lvec.size(); test_id++)
     {
@@ -274,11 +276,15 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                                                          [](const diskann::QueryStats &stats) { return stats.io_us; });
 
         double recall = 0;
+        double recall_at_1 = 0;
         if (calc_recall_flag)
         {
             recall = diskann::calculate_recall((uint32_t)query_num, gt_ids, gt_dists, (uint32_t)gt_dim,
                                                query_result_ids[test_id].data(), recall_at, recall_at);
             best_recall = std::max(recall, best_recall);
+            recall_at_1 = diskann::calculate_recall((uint32_t)query_num, gt_ids, gt_dists, (uint32_t)gt_dim,
+                                                    query_result_ids[test_id].data(), recall_at, 1);
+            best_recall_at_1 = std::max(recall_at_1, best_recall_at_1);
         }
 
         diskann::cout << std::setw(6) << L << std::setw(12) << optimized_beamwidth << std::setw(16) << qps
@@ -286,7 +292,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       << std::setw(16) << mean_io_us << std::setw(16) << mean_cpuus;
         if (calc_recall_flag)
         {
-            diskann::cout << std::setw(16) << recall << std::endl;
+            diskann::cout << std::setw(16) << recall << std::setw(16) << recall_at_1 << std::endl;
         }
         else
             diskann::cout << std::endl;
