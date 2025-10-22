@@ -209,6 +209,11 @@ template <typename T, typename LabelT> void PQFlashIndex<T, LabelT>::load_cache_
     diskann::cout << "Loading the cache list into memory.." << std::flush;
     size_t num_cached_nodes = node_list.size();
 
+    if (_num_points > 0)
+        _cached_nodes_bitmap.assign(static_cast<size_t>(_num_points), 0);
+    else
+        _cached_nodes_bitmap.clear();
+
     // Allocate space for neighborhood cache
     _nhood_cache_buf = new uint32_t[num_cached_nodes * (_max_degree + 1)];
     memset(_nhood_cache_buf, 0, num_cached_nodes * (_max_degree + 1));
@@ -246,6 +251,10 @@ template <typename T, typename LabelT> void PQFlashIndex<T, LabelT>::load_cache_
             {
                 _coord_cache.insert(std::make_pair(nodes_to_read[i], coord_buffers[i]));
                 _nhood_cache.insert(std::make_pair(nodes_to_read[i], nbr_buffers[i]));
+                if (nodes_to_read[i] < _cached_nodes_bitmap.size())
+                {
+                    _cached_nodes_bitmap[nodes_to_read[i]] = 1;
+                }
             }
         }
     }
@@ -1791,45 +1800,51 @@ float PQFlashIndex<T, LabelT>::get_penalized_distance(const uint32_t candidate_i
         return original_dist;
     }
 
-    auto iter = _nhood_cache.find(candidate_id);
-    float miss_fraction = 0.0f;
-    if (iter == _nhood_cache.end())
-    {
-        miss_fraction = 1.0f;
-    }
-    else
-    {
-        uint32_t grandchildren_count = iter->second.first;
-        uint32_t *grandchildren_ids = iter->second.second;
-        if (grandchildren_count != 0)
+    auto apply_penalty = [&](float factor) -> float {
+        if (metric == diskann::Metric::INNER_PRODUCT && original_dist < 0.0f)
         {
-            uint32_t n_missing = 0;
-            for (uint32_t i = 0; i < grandchildren_count; ++i)
-            {
-                if (_nhood_cache.find(grandchildren_ids[i]) == _nhood_cache.end())
-                {
-                    n_missing++;
-                }
-            }
-            miss_fraction = static_cast<float>(n_missing) / static_cast<float>(grandchildren_count);
+            return original_dist / factor;
         }
+        return original_dist * factor;
+    };
+
+    if (!node_is_cached(candidate_id))
+    {
+        return apply_penalty(1.0f + lambda);
     }
 
-    if (miss_fraction <= 0.0f)
+    auto iter = _nhood_cache.find(candidate_id);
+    if (iter == _nhood_cache.end())
+    {
+        // Defensive: if bitmap and cache map diverge, fall back to uncached penalty
+        return apply_penalty(1.0f + lambda);
+    }
+
+    const uint32_t grandchildren_count = iter->second.first;
+    uint32_t *grandchildren_ids = iter->second.second;
+
+    if (grandchildren_count == 0)
     {
         return original_dist;
     }
 
-    const float penalty_factor = 1.0f + lambda * miss_fraction;
+    uint32_t n_missing = 0;
+    for (uint32_t i = 0; i < grandchildren_count; ++i)
+    {
+        if (!node_is_cached(grandchildren_ids[i]))
+        {
+            n_missing++;
+        }
+    }
 
-    if (metric == diskann::Metric::INNER_PRODUCT && original_dist < 0.0f)
+    if (n_missing == 0)
     {
-        return original_dist / penalty_factor;
+        return original_dist;
     }
-    else
-    {
-        return original_dist * penalty_factor;
-    }
+
+    const float miss_fraction = static_cast<float>(n_missing) / static_cast<float>(grandchildren_count);
+    const float penalty_factor = 1.0f + lambda * miss_fraction;
+    return apply_penalty(penalty_factor);
 }
 
 // instantiations

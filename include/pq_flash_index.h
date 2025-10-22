@@ -117,6 +117,10 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
   private:
     DISKANN_DLLEXPORT float get_penalized_distance(const uint32_t candidate_id, const float original_dist, const float lambda, IOContext &ctx);
     DISKANN_DLLEXPORT inline bool point_has_label(uint32_t point_id, LabelT label_id);
+    inline bool node_is_cached(uint32_t node_id) const
+    {
+        return node_id < _cached_nodes_bitmap.size() && _cached_nodes_bitmap[node_id] != 0;
+    }
     std::unordered_map<std::string, LabelT> load_label_map(std::basic_istream<char> &infile);
     DISKANN_DLLEXPORT void parse_label_file(std::basic_istream<char> &infile, size_t &num_pts_labels);
     DISKANN_DLLEXPORT void get_label_file_metadata(const std::string &fileContent, uint32_t &num_pts,
@@ -213,6 +217,7 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
     // coord_cache; The T* in coord_cache are offsets into coord_cache_buf
     T *_coord_cache_buf = nullptr;
     tsl::robin_map<uint32_t, T *> _coord_cache;
+    std::vector<uint8_t> _cached_nodes_bitmap;
 
     // thread-specific scratch
     ConcurrentQueue<SSDThreadData<T> *> _thread_data;
