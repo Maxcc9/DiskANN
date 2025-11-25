@@ -23,9 +23,65 @@ namespace po = boost::program_options;
 int main(int argc, char **argv)
 {
     // --- 參數定義 ---
-    std::string data_type, dist_fn, data_path, index_path_prefix, codebook_prefix, label_file, universal_label,
+    std::string 
+        // 資料向量的資料型別（必填）。接受值範例：
+        //   "float"   - 32-bit 浮點向量
+        //   "int8"    - 有號 8-bit 量化向量
+        //   "uint8"   - 無號 8-bit 量化向量
+        // 用於選擇對應 template 與壓縮/重排序支援。由命令列參數 --data_type 設定。
+        data_type,
+
+        // 距離函數（必填）。接受值範例：
+        //   "l2"      - 歐氏距離
+        //   "mips"    - 內積 (maximum inner product)
+        //   "cosine"  - 餘弦相似度
+        // 用來決定 metric 與建置 / 搜尋時的距離計算方式。由 --dist_fn 設定。
+        dist_fn,
+
+        // 輸入資料檔路徑（必填）。指向包含向量資料的檔案或資料集前置路徑。
+        // 格式與具體檔案型態依專案輸入格式而定（例如二進位向量檔、.fvecs/.bin 等）。
+        // 由 --data_path 設定。
+        data_path,
+
+        // 輸出索引檔案的路徑前綴（必填）。最終會以此 prefix 產生多個索引相關檔案（例如 .graph/.data 等）。
+        // 由 --index_path_prefix 設定。
+        index_path_prefix,
+
+        // 預訓練 codebook 的路徑前綴（選用）。當使用 PQ/OPQ 時可指定先前訓練好的 codebook 檔案前綴，
+        // 若不指定則會在建置流程中自行訓練/產生。由 --codebook_prefix 設定，預設為空字串（表示不使用）。
+        codebook_prefix,
+
+        // 標籤檔案路徑（選用）。用於啟用過濾或分群等功能時，提供每個向量的標籤資訊。
+        // 檔案格式與每行/每向量標籤的具體規範請參考專案文件。由 --label_file 設定，預設為空字串（表示未使用）。
+        label_file,
+
+        // 通用標籤（選用）。當想對所有向量指定相同標籤或作為 fallback 標籤時使用：
+        // 例如傳入單一字串標籤，或某種語意上的預設值。由 --universal_label 設定，預設為空字串。
+        universal_label,
+
+        // 標籤資料型別（選用）。指定 label 在索引內儲存的型別，範例：
+        //   "uint"   - 使用 unsigned int（預設）
+        //   "ushort" - 使用 unsigned short（較小記憶體）
+        // 影響 template 特化與 IO。由 --label_type 設定，預設為 "uint"。
         label_type;
-    uint32_t num_threads, R, L, disk_PQ, build_PQ, QD, Lf, filter_threshold;
+        
+    uint32_t
+        // num_threads: 要使用的執行緒數量。由命令列參數 --num_threads / -T 設定，預設為 omp_get_num_procs()。
+        num_threads,
+        // R: 建構時每個節點的最大度 (max_degree)。影響圖的稠密度與搜尋/建構效能。由 --max_degree / -R 設定 (預設 64)。
+        R,
+        // L: 建構時的搜尋複雜度（Lbuild）。控制在建圖階段候選節點搜尋的廣度/深度。由 --Lbuild / -L 設定 (預設 100)。
+        L,
+        // disk_PQ: 將向量壓縮到磁碟時每向量使用的位元組數。0 表示不壓縮。由 --PQ_disk_bytes 設定。
+        disk_PQ,
+        // build_PQ: 在建構流程中使用的 PQ byte 大小（若啟用）。由 --build_PQ_bytes 設定，影響建構時的壓縮/記憶體使用。
+        build_PQ,
+        // QD: Quantized Dimension（量化後的維度），用於特定壓縮流程。由 --QD 設定，0 表示未啟用/使用預設行為。
+        QD,
+        // Lf: Filtered L-build，用於有標籤或過濾情境下的建構複雜度參數（類似 L，但針對被過濾的子圖）。由 --FilteredLbuild 設定。
+        Lf,
+        // filter_threshold: 標籤過濾閥值 F。用於在內部切分/重建節點時限制每個節點上的最大標籤數量。由 --filter_threshold / -F 設定。
+        filter_threshold;
     float B, M; // B: 搜尋時的 DRAM 預算, M: 建立時的 DRAM 預算
     bool append_reorder_data = false;
     bool use_opq = false;
@@ -63,7 +119,7 @@ int main(int argc, char **argv)
         optional_configs.add_options()("Lbuild,L", po::value<uint32_t>(&L)->default_value(100),
                                        program_options_utils::GRAPH_BUILD_COMPLEXITY);
         optional_configs.add_options()("QD", po::value<uint32_t>(&QD)->default_value(0),
-                                       " Quantized Dimension for compression");
+                                       "Quantized Dimension for compression");
         optional_configs.add_options()("codebook_prefix", po::value<std::string>(&codebook_prefix)->default_value(""),
                                        "Path prefix for pre-trained codebook");
         optional_configs.add_options()("PQ_disk_bytes", po::value<uint32_t>(&disk_PQ)->default_value(0),
