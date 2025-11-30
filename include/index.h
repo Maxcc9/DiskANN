@@ -18,6 +18,7 @@
 #include "utils.h"
 #include "windows_customizations.h"
 #include "scratch.h"
+#include "percentile_stats.h"
 #include "in_mem_data_store.h"
 #include "in_mem_graph_store.h"
 #include "abstract_index.h"
@@ -132,18 +133,20 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
     // can customize L on a per-query basis without tampering with "Parameters"
     template <typename IDType>
     DISKANN_DLLEXPORT std::pair<uint32_t, uint32_t> search(const T *query, const size_t K, const uint32_t L,
-                                                           IDType *indices, float *distances = nullptr);
+                                                           IDType *indices, float *distances = nullptr,
+                                                           QueryStats *stats = nullptr);
 
     // Initialize space for res_vectors before calling.
     DISKANN_DLLEXPORT size_t search_with_tags(const T *query, const uint64_t K, const uint32_t L, TagT *tags,
                                               float *distances, std::vector<T *> &res_vectors, bool use_filters = false,
-                                              const std::string filter_label = "");
+                                              const std::string filter_label = "", QueryStats *stats = nullptr);
 
     // Filter support search
     template <typename IndexType>
     DISKANN_DLLEXPORT std::pair<uint32_t, uint32_t> search_with_filters(const T *query, const LabelT &filter_label,
                                                                         const size_t K, const uint32_t L,
-                                                                        IndexType *indices, float *distances);
+                                                                        IndexType *indices, float *distances,
+                                                                        QueryStats *stats = nullptr);
 
     // Will fail if tag already in the index or if tag=0.
     DISKANN_DLLEXPORT int insert_point(const T *point, const TagT tag);
@@ -205,11 +208,12 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
     virtual void _build(const DataType &data, const size_t num_points_to_load, TagVector &tags) override;
 
     virtual std::pair<uint32_t, uint32_t> _search(const DataType &query, const size_t K, const uint32_t L,
-                                                  std::any &indices, float *distances = nullptr) override;
+                                                  std::any &indices, float *distances = nullptr,
+                                                  QueryStats *stats = nullptr) override;
     virtual std::pair<uint32_t, uint32_t> _search_with_filters(const DataType &query,
                                                                const std::string &filter_label_raw, const size_t K,
                                                                const uint32_t L, std::any &indices,
-                                                               float *distances) override;
+                                                               float *distances, QueryStats *stats = nullptr) override;
 
     virtual int _insert_point(const DataType &data_point, const TagType tag) override;
     virtual int _insert_point(const DataType &data_point, const TagType tag, Labelvector &labels) override;
@@ -228,7 +232,7 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
 
     virtual size_t _search_with_tags(const DataType &query, const uint64_t K, const uint32_t L, const TagType &tags,
                                      float *distances, DataVector &res_vectors, bool use_filters = false,
-                                     const std::string filter_label = "") override;
+                                     const std::string filter_label = "", QueryStats *stats = nullptr) override;
 
     virtual void _set_universal_label(const LabelType universal_label) override;
 
@@ -258,7 +262,8 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
     // The query to use is placed in scratch->aligned_query
     std::pair<uint32_t, uint32_t> iterate_to_fixed_point(InMemQueryScratch<T> *scratch, const uint32_t Lindex,
                                                          const std::vector<uint32_t> &init_ids, bool use_filter,
-                                                         const std::vector<LabelT> &filters, bool search_invocation);
+                                                         const std::vector<LabelT> &filters, bool search_invocation,
+                                                         QueryStats *stats = nullptr);
 
     void search_for_point_and_prune(int location, uint32_t Lindex, std::vector<uint32_t> &pruned_list,
                                     InMemQueryScratch<T> *scratch, bool use_filter = false,

@@ -14,6 +14,9 @@
 #include "percentile_stats.h"
 #include "program_options_utils.hpp"
 
+#include <fstream>
+#include <unordered_set>
+
 #ifndef _WINDOWS
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -47,13 +50,40 @@ void print_stats(std::string category, std::vector<float> percentiles, std::vect
     diskann::cout << std::endl;
 }
 
+struct StatRow
+{
+    uint32_t L = 0;
+    uint32_t beamwidth = 0;
+    double qps = 0;
+    double mean_latency = 0;
+    double latency_999 = 0;
+    double mean_ios = 0;
+    double mean_io_us = 0;
+    double mean_cpu_us = 0;
+    bool has_recall = false;
+    double recall = 0;
+    double hop_mean = 0;
+    double hop_p50 = 0;
+    double hop_p90 = 0;
+    double hop_p95 = 0;
+    double hop_p99 = 0;
+    double hop_max = 0;
+    double visited_mean = 0;
+    double visited_p50 = 0;
+    double visited_p90 = 0;
+    double visited_p95 = 0;
+    double visited_p99 = 0;
+    double visited_max = 0;
+};
+
 template <typename T, typename LabelT = uint32_t>
 int search_disk_index(diskann::Metric &metric, const std::string &index_path_prefix,
                       const std::string &result_output_prefix, const std::string &query_file, std::string &gt_file,
                       const uint32_t num_threads, const uint32_t recall_at, const uint32_t beamwidth,
                       const uint32_t num_nodes_to_cache, const uint32_t search_io_limit,
                       const std::vector<uint32_t> &Lvec, const float fail_if_recall_below,
-                      const std::vector<std::string> &query_filters, const bool use_reorder_data = false)
+                      const std::vector<std::string> &query_filters, const bool use_reorder_data = false,
+                      const std::string &stats_csv_path = "", const bool append_search_params = false)
 {
     diskann::cout << "Search parameters: #threads: " << num_threads << ", ";
     if (beamwidth <= 0)
@@ -190,12 +220,110 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                      "================================================================="
                   << std::endl;
 
+    std::vector<StatRow> stats_summary;
     std::vector<std::vector<uint32_t>> query_result_ids(Lvec.size());
     std::vector<std::vector<float>> query_result_dists(Lvec.size());
 
     uint32_t optimized_beamwidth = 2;
 
+    auto split_dir_and_base = [](const std::string &path, std::string &dir, std::string &base) {
+        dir.clear();
+        base.clear();
+        if (path.empty())
+        {
+            dir = ".";
+            return;
+        }
+        if (path.back() == '/')
+        {
+            dir = path.substr(0, path.size() - 1);
+            if (dir.empty())
+                dir = ".";
+            return;
+        }
+        auto pos = path.find_last_of("/\\");
+        if (pos == std::string::npos)
+        {
+            dir = ".";
+            base = path;
+        }
+        else
+        {
+            dir = path.substr(0, pos);
+            if (dir.empty())
+                dir = ".";
+            base = path.substr(pos + 1);
+        }
+    };
+    auto get_basename = [](const std::string &path) {
+        auto pos = path.find_last_of("/\\");
+        if (pos == std::string::npos)
+            return path;
+        return path.substr(pos + 1);
+    };
+
+    std::string result_dir, user_prefix;
+    split_dir_and_base(result_output_prefix, result_dir, user_prefix);
+    const std::string index_basename = get_basename(index_path_prefix);
+
+    auto build_param_suffix = [&](uint32_t bw_value) {
+        std::ostringstream oss;
+        if (append_search_params)
+        {
+            oss << "_W" << bw_value << "_cache" << num_nodes_to_cache << "_T" << num_threads;
+        }
+        return oss.str();
+    };
+
+    auto base_output_prefix = [&](uint32_t bw_value) {
+        std::ostringstream oss;
+        oss << result_dir << "/";
+        if (!user_prefix.empty())
+            oss << user_prefix << "_";
+        oss << index_basename << build_param_suffix(bw_value);
+        return oss.str();
+    };
+
+    auto make_result_prefix_for_l = [&](uint32_t l_value, uint32_t bw_value) {
+        std::ostringstream oss;
+        oss << base_output_prefix(bw_value) << "_L" << l_value;
+        return oss.str();
+    };
+
     double best_recall = 0.0;
+    std::string per_query_csv_path = stats_csv_path;
+    if (per_query_csv_path.empty())
+    {
+        per_query_csv_path = base_output_prefix(optimized_beamwidth) + "_query_stats.csv";
+    }
+    std::ofstream per_query_csv(per_query_csv_path, std::ios::out | std::ios::trunc);
+    if (!per_query_csv.is_open())
+    {
+        diskann::cerr << "Failed to open per-query stats csv file: " << per_query_csv_path << std::endl;
+    }
+    else
+    {
+        per_query_csv << "query_id,L,beamwidth,thread_id,total_us,io_us,cpu_us,n_ios,read_size,n_cache_hits,n_hops,"
+                      << "visited_nodes,recall_match_count\n";
+    }
+
+    auto compute_recall_matches = [&](uint32_t query_idx, uint32_t test_id) -> uint32_t {
+        if (!calc_recall_flag)
+            return 0;
+        const uint32_t *gt_q = gt_ids + ((uint64_t)query_idx * gt_dim);
+        const uint32_t *res_q = query_result_ids[test_id].data() + ((uint64_t)query_idx * recall_at);
+        uint32_t limit = std::min<uint32_t>(gt_dim, recall_at);
+        std::unordered_set<uint32_t> gt_set(gt_q, gt_q + limit);
+        uint32_t matches = 0;
+        for (uint32_t i = 0; i < recall_at; i++)
+        {
+            if (gt_set.find(res_q[i]) != gt_set.end())
+            {
+                matches++;
+            }
+        }
+        return matches;
+    };
 
     for (uint32_t test_id = 0; test_id < Lvec.size(); test_id++)
     {
@@ -227,6 +355,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 #pragma omp parallel for schedule(dynamic, 1)
         for (int64_t i = 0; i < (int64_t)query_num; i++)
         {
+            stats[i].thread_id = (unsigned)omp_get_thread_num();
             if (!filtered_search)
             {
                 _pFlashIndex->cached_beam_search(query + (i * query_aligned_dim), recall_at, L,
@@ -273,6 +402,32 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         auto mean_io_us = diskann::get_mean_stats<float>(stats, query_num,
                                                          [](const diskann::QueryStats &stats) { return stats.io_us; });
 
+        auto hop_mean = diskann::get_mean_stats<uint32_t>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.n_hops; });
+        auto hop_p50 = diskann::get_percentile_stats<uint32_t>(
+            stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return stats.n_hops; });
+        auto hop_p90 = diskann::get_percentile_stats<uint32_t>(
+            stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return stats.n_hops; });
+        auto hop_p95 = diskann::get_percentile_stats<uint32_t>(
+            stats, query_num, 0.95f, [](const diskann::QueryStats &stats) { return stats.n_hops; });
+        auto hop_p99 = diskann::get_percentile_stats<uint32_t>(
+            stats, query_num, 0.99f, [](const diskann::QueryStats &stats) { return stats.n_hops; });
+        auto hop_max = diskann::get_max_stats<uint32_t>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.n_hops; });
+
+        auto visited_mean = diskann::get_mean_stats<uint32_t>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.visited_nodes; });
+        auto visited_p50 = diskann::get_percentile_stats<uint32_t>(
+            stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return stats.visited_nodes; });
+        auto visited_p90 = diskann::get_percentile_stats<uint32_t>(
+            stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return stats.visited_nodes; });
+        auto visited_p95 = diskann::get_percentile_stats<uint32_t>(
+            stats, query_num, 0.95f, [](const diskann::QueryStats &stats) { return stats.visited_nodes; });
+        auto visited_p99 = diskann::get_percentile_stats<uint32_t>(
+            stats, query_num, 0.99f, [](const diskann::QueryStats &stats) { return stats.visited_nodes; });
+        auto visited_max = diskann::get_max_stats<uint32_t>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.visited_nodes; });
+
         double recall = 0;
         if (calc_recall_flag)
         {
@@ -280,6 +435,31 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                                                query_result_ids[test_id].data(), recall_at, recall_at);
             best_recall = std::max(recall, best_recall);
         }
+
+        StatRow row;
+        row.L = L;
+        row.beamwidth = optimized_beamwidth;
+        row.qps = qps;
+        row.mean_latency = mean_latency;
+        row.latency_999 = latency_999;
+        row.mean_ios = mean_ios;
+        row.mean_io_us = mean_io_us;
+        row.mean_cpu_us = mean_cpuus;
+        row.has_recall = calc_recall_flag;
+        row.recall = recall;
+        row.hop_mean = hop_mean;
+        row.hop_p50 = hop_p50;
+        row.hop_p90 = hop_p90;
+        row.hop_p95 = hop_p95;
+        row.hop_p99 = hop_p99;
+        row.hop_max = hop_max;
+        row.visited_mean = visited_mean;
+        row.visited_p50 = visited_p50;
+        row.visited_p90 = visited_p90;
+        row.visited_p95 = visited_p95;
+        row.visited_p99 = visited_p99;
+        row.visited_max = visited_max;
+        stats_summary.push_back(row);
 
         diskann::cout << std::setw(6) << L << std::setw(12) << optimized_beamwidth << std::setw(16) << qps
                       << std::setw(16) << mean_latency << std::setw(16) << latency_999 << std::setw(16) << mean_ios
@@ -290,7 +470,56 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         }
         else
             diskann::cout << std::endl;
+
+        diskann::cout << "    HopCount mean/median/p90/p95/p99/max: " << hop_mean << "/" << hop_p50 << "/" << hop_p90
+                      << "/" << hop_p95 << "/" << hop_p99 << "/" << hop_max << std::endl;
+        diskann::cout << "    VisitedNodes mean/median/p90/p95/p99/max: " << visited_mean << "/" << visited_p50 << "/"
+                      << visited_p90 << "/" << visited_p95 << "/" << visited_p99 << "/" << visited_max << std::endl;
+
+        if (per_query_csv.is_open())
+        {
+            std::ostringstream oss;
+            oss.setf(std::ios::fixed);
+            oss.precision(4);
+            for (uint32_t qi = 0; qi < query_num; qi++)
+            {
+                stats[qi].recall_match_count = compute_recall_matches(qi, test_id);
+                oss << qi << "," << L << "," << optimized_beamwidth << "," << stats[qi].thread_id << ","
+                    << stats[qi].total_us << "," << stats[qi].io_us << "," << stats[qi].cpu_us << "," << stats[qi].n_ios
+                    << "," << stats[qi].read_size << "," << stats[qi].n_cache_hits << "," << stats[qi].n_hops << ","
+                    << stats[qi].visited_nodes << "," << stats[qi].recall_match_count << "\n";
+            }
+            per_query_csv << oss.str();
+        }
         delete[] stats;
+    }
+
+    std::string csv_path = base_output_prefix(optimized_beamwidth) + "_summary_stats.csv";
+    std::ofstream csv_stream(csv_path, std::ios::out | std::ios::trunc);
+    if (!csv_stream.is_open())
+    {
+        diskann::cerr << "Failed to open stats csv file: " << csv_path << std::endl;
+    }
+    else
+    {
+        csv_stream << "L,beamwidth,qps,mean_latency_us,latency_p999_us,mean_ios,mean_io_us,mean_cpu_us,recall,"
+                   << "hop_mean,hop_p50,hop_p90,hop_p95,hop_p99,hop_max,"
+                   << "visited_mean,visited_p50,visited_p90,visited_p95,visited_p99,visited_max\n";
+        csv_stream << std::fixed << std::setprecision(4);
+        for (const auto &row : stats_summary)
+        {
+            csv_stream << row.L << "," << row.beamwidth << "," << row.qps << "," << row.mean_latency << ","
+                       << row.latency_999 << "," << row.mean_ios << "," << row.mean_io_us << "," << row.mean_cpu_us
+                       << ",";
+            if (row.has_recall)
+            {
+                csv_stream << row.recall;
+            }
+            csv_stream << "," << row.hop_mean << "," << row.hop_p50 << "," << row.hop_p90 << "," << row.hop_p95 << ","
+                       << row.hop_p99 << "," << row.hop_max << "," << row.visited_mean << "," << row.visited_p50 << ","
+                       << row.visited_p90 << "," << row.visited_p95 << "," << row.visited_p99 << "," << row.visited_max
+                       << "\n";
+        }
     }
 
     diskann::cout << "Done searching. Now saving results " << std::endl;
@@ -300,10 +529,11 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         if (L < recall_at)
             continue;
 
-        std::string cur_result_path = result_output_prefix + "_" + std::to_string(L) + "_idx_uint32.bin";
+        std::string base_prefix = make_result_prefix_for_l(L, optimized_beamwidth);
+        std::string cur_result_path = base_prefix + "_idx_uint32.bin";
         diskann::save_bin<uint32_t>(cur_result_path, query_result_ids[test_id].data(), query_num, recall_at);
 
-        cur_result_path = result_output_prefix + "_" + std::to_string(L) + "_dists_float.bin";
+        cur_result_path = base_prefix + "_dists_float.bin";
         diskann::save_bin<float>(cur_result_path, query_result_dists[test_id++].data(), query_num, recall_at);
     }
 
@@ -316,10 +546,11 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 int main(int argc, char **argv)
 {
     std::string data_type, dist_fn, index_path_prefix, result_path_prefix, query_file, gt_file, filter_label,
-        label_type, query_filters_file;
+        label_type, query_filters_file, stats_csv_path;
     uint32_t num_threads, K, W, num_nodes_to_cache, search_io_limit;
     std::vector<uint32_t> Lvec;
     bool use_reorder_data = false;
+    bool append_search_params = false;
     float fail_if_recall_below = 0.0f;
 
     po::options_description desc{
@@ -375,6 +606,12 @@ int main(int argc, char **argv)
         optional_configs.add_options()("fail_if_recall_below",
                                        po::value<float>(&fail_if_recall_below)->default_value(0.0f),
                                        program_options_utils::FAIL_IF_RECALL_BELOW);
+        optional_configs.add_options()(
+            "stats_csv_path", po::value<std::string>(&stats_csv_path)->default_value(std::string("")),
+            "Path to write per-query stats (CSV) for spreadsheet analysis. Defaults to <result_path>_query_stats.csv");
+        optional_configs.add_options()("append_search_params_to_result_path,A", po::bool_switch(&append_search_params),
+                                       "Append _W<beamwidth>_cache<num_nodes_to_cache>_T<num_threads>_L<L> to "
+                                       "result_path for outputs");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -454,15 +691,18 @@ int main(int argc, char **argv)
             if (data_type == std::string("float"))
                 return search_disk_index<float, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
+                    stats_csv_path, append_search_params);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
+                    stats_csv_path, append_search_params);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
+                    stats_csv_path, append_search_params);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;
@@ -474,15 +714,18 @@ int main(int argc, char **argv)
             if (data_type == std::string("float"))
                 return search_disk_index<float>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                 num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                fail_if_recall_below, query_filters, use_reorder_data);
+                                                fail_if_recall_below, query_filters, use_reorder_data, stats_csv_path,
+                                                append_search_params);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                  num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                 fail_if_recall_below, query_filters, use_reorder_data);
+                                                 fail_if_recall_below, query_filters, use_reorder_data, stats_csv_path,
+                                                 append_search_params);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                   num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                  fail_if_recall_below, query_filters, use_reorder_data);
+                                                  fail_if_recall_below, query_filters, use_reorder_data, stats_csv_path,
+                                                  append_search_params);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;

@@ -21,6 +21,7 @@ int main(int argc, char **argv)
     float B, M;
     bool append_reorder_data = false;
     bool use_opq = false;
+    bool append_params_to_prefix = false;
 
     po::options_description desc{
         program_options_utils::make_program_description("build_disk_index", "Build a disk-based index.")};
@@ -78,6 +79,9 @@ int main(int argc, char **argv)
                                        "internally where each node has a maximum F labels.");
         optional_configs.add_options()("label_type", po::value<std::string>(&label_type)->default_value("uint"),
                                        program_options_utils::LABEL_TYPE_DESCRIPTION);
+        optional_configs.add_options()("append_params_to_prefix,A", po::bool_switch(&append_params_to_prefix),
+                                       "Append build params to index_path_prefix "
+                                       "(_R{R}_L{L}_B{B}_M{M}_PQd{PQ_disk}_PQb{PQ_build}_OPQ{0/1}_reord{0/1})");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -133,6 +137,16 @@ int main(int argc, char **argv)
         }
     }
 
+    std::string index_prefix = index_path_prefix;
+    if (append_params_to_prefix)
+    {
+        std::ostringstream oss;
+        oss << index_path_prefix << "_R" << R << "_L" << L << "_B" << B << "_M" << M << "_PQd" << disk_PQ << "_PQb"
+            << build_PQ << "_OPQ" << (use_opq ? 1 : 0) << "_reord" << (append_reorder_data ? 1 : 0);
+        index_prefix = oss.str();
+        std::cout << "Adjusted index_path_prefix to: " << index_prefix << std::endl;
+    }
+
     std::string params = std::string(std::to_string(R)) + " " + std::string(std::to_string(L)) + " " +
                          std::string(std::to_string(B)) + " " + std::string(std::to_string(M)) + " " +
                          std::string(std::to_string(num_threads)) + " " + std::string(std::to_string(disk_PQ)) + " " +
@@ -144,16 +158,16 @@ int main(int argc, char **argv)
         if (label_file != "" && label_type == "ushort")
         {
             if (data_type == std::string("int8"))
-                return diskann::build_disk_index<int8_t>(data_path.c_str(), index_path_prefix.c_str(), params.c_str(),
+                return diskann::build_disk_index<int8_t>(data_path.c_str(), index_prefix.c_str(), params.c_str(),
                                                          metric, use_opq, codebook_prefix, use_filters, label_file,
                                                          universal_label, filter_threshold, Lf);
             else if (data_type == std::string("uint8"))
                 return diskann::build_disk_index<uint8_t, uint16_t>(
-                    data_path.c_str(), index_path_prefix.c_str(), params.c_str(), metric, use_opq, codebook_prefix,
+                    data_path.c_str(), index_prefix.c_str(), params.c_str(), metric, use_opq, codebook_prefix,
                     use_filters, label_file, universal_label, filter_threshold, Lf);
             else if (data_type == std::string("float"))
                 return diskann::build_disk_index<float, uint16_t>(
-                    data_path.c_str(), index_path_prefix.c_str(), params.c_str(), metric, use_opq, codebook_prefix,
+                    data_path.c_str(), index_prefix.c_str(), params.c_str(), metric, use_opq, codebook_prefix,
                     use_filters, label_file, universal_label, filter_threshold, Lf);
             else
             {
@@ -164,15 +178,15 @@ int main(int argc, char **argv)
         else
         {
             if (data_type == std::string("int8"))
-                return diskann::build_disk_index<int8_t>(data_path.c_str(), index_path_prefix.c_str(), params.c_str(),
+                return diskann::build_disk_index<int8_t>(data_path.c_str(), index_prefix.c_str(), params.c_str(),
                                                          metric, use_opq, codebook_prefix, use_filters, label_file,
                                                          universal_label, filter_threshold, Lf);
             else if (data_type == std::string("uint8"))
-                return diskann::build_disk_index<uint8_t>(data_path.c_str(), index_path_prefix.c_str(), params.c_str(),
+                return diskann::build_disk_index<uint8_t>(data_path.c_str(), index_prefix.c_str(), params.c_str(),
                                                           metric, use_opq, codebook_prefix, use_filters, label_file,
                                                           universal_label, filter_threshold, Lf);
             else if (data_type == std::string("float"))
-                return diskann::build_disk_index<float>(data_path.c_str(), index_path_prefix.c_str(), params.c_str(),
+                return diskann::build_disk_index<float>(data_path.c_str(), index_prefix.c_str(), params.c_str(),
                                                         metric, use_opq, codebook_prefix, use_filters, label_file,
                                                         universal_label, filter_threshold, Lf);
             else

@@ -5,6 +5,7 @@
 #include "types.h"
 #include "index_config.h"
 #include "index_build_params.h"
+#include "percentile_stats.h"
 #include <any>
 
 namespace diskann
@@ -63,21 +64,21 @@ class AbstractIndex
     template <typename data_type, typename tag_type>
     size_t search_with_tags(const data_type *query, const uint64_t K, const uint32_t L, tag_type *tags,
                             float *distances, std::vector<data_type *> &res_vectors, bool use_filters = false,
-                            const std::string filter_label = "");
+                            const std::string filter_label = "", QueryStats *stats = nullptr);
 
     // Added search overload that takes L as parameter, so that we
     // can customize L on a per-query basis without tampering with "Parameters"
     // IDtype is either uint32_t or uint64_t
     template <typename data_type, typename IDType>
     std::pair<uint32_t, uint32_t> search(const data_type *query, const size_t K, const uint32_t L, IDType *indices,
-                                         float *distances = nullptr);
+                                         float *distances = nullptr, QueryStats *stats = nullptr);
 
     // Filter support search
     // IndexType is either uint32_t or uint64_t
     template <typename IndexType>
     std::pair<uint32_t, uint32_t> search_with_filters(const DataType &query, const std::string &raw_label,
                                                       const size_t K, const uint32_t L, IndexType *indices,
-                                                      float *distances);
+                                                      float *distances, QueryStats *stats = nullptr);
 
     // insert points with labels, labels should be present for filtered index
     template <typename data_type, typename tag_type, typename label_type>
@@ -109,10 +110,11 @@ class AbstractIndex
   private:
     virtual void _build(const DataType &data, const size_t num_points_to_load, TagVector &tags) = 0;
     virtual std::pair<uint32_t, uint32_t> _search(const DataType &query, const size_t K, const uint32_t L,
-                                                  std::any &indices, float *distances = nullptr) = 0;
+                                                  std::any &indices, float *distances = nullptr,
+                                                  QueryStats *stats = nullptr) = 0;
     virtual std::pair<uint32_t, uint32_t> _search_with_filters(const DataType &query, const std::string &filter_label,
                                                                const size_t K, const uint32_t L, std::any &indices,
-                                                               float *distances) = 0;
+                                                               float *distances, QueryStats *stats = nullptr) = 0;
     virtual int _insert_point(const DataType &data_point, const TagType tag, Labelvector &labels) = 0;
     virtual int _insert_point(const DataType &data_point, const TagType tag) = 0;
     virtual int _lazy_delete(const TagType &tag) = 0;
@@ -122,7 +124,7 @@ class AbstractIndex
     virtual int _get_vector_by_tag(TagType &tag, DataType &vec) = 0;
     virtual size_t _search_with_tags(const DataType &query, const uint64_t K, const uint32_t L, const TagType &tags,
                                      float *distances, DataVector &res_vectors, bool use_filters = false,
-                                     const std::string filter_label = "") = 0;
+                                     const std::string filter_label = "", QueryStats *stats = nullptr) = 0;
     virtual void _search_with_optimized_layout(const DataType &query, size_t K, size_t L, uint32_t *indices) = 0;
     virtual void _set_universal_label(const LabelType universal_label) = 0;
 };

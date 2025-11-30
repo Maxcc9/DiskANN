@@ -1610,6 +1610,12 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         hops++;
     }
 
+    if (stats != nullptr)
+    {
+        stats->n_hops = hops;
+        stats->visited_nodes = static_cast<unsigned>(visited.size());
+    }
+
     // re-sort by distance
     std::sort(full_retset.begin(), full_retset.end());
 
