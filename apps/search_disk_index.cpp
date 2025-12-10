@@ -303,7 +303,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     }
     else
     {
-        per_query_csv << "query_id,L,beamwidth,thread_id,total_us,io_us,cpu_us,n_ios,read_size,n_cache_hits,n_hops,"
+        per_query_csv << "query_id,L,beamwidth,thread_id,total_us,io_us,cpu_us,n_ios,n_4k,n_cache_hits,n_hops,"
                       << "visited_nodes,recall_match_count\n";
     }
 
@@ -486,7 +486,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                 stats[qi].recall_match_count = compute_recall_matches(qi, test_id);
                 oss << qi << "," << L << "," << optimized_beamwidth << "," << stats[qi].thread_id << ","
                     << stats[qi].total_us << "," << stats[qi].io_us << "," << stats[qi].cpu_us << "," << stats[qi].n_ios
-                    << "," << stats[qi].read_size << "," << stats[qi].n_cache_hits << "," << stats[qi].n_hops << ","
+                    << "," << stats[qi].n_4k << "," << stats[qi].n_cache_hits << "," << stats[qi].n_hops << ","
                     << stats[qi].visited_nodes << "," << stats[qi].recall_match_count << "\n";
             }
             per_query_csv << oss.str();
