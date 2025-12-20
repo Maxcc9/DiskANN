@@ -81,7 +81,7 @@ int main(int argc, char **argv)
                                        program_options_utils::LABEL_TYPE_DESCRIPTION);
         optional_configs.add_options()("append_params_to_prefix,A", po::bool_switch(&append_params_to_prefix),
                                        "Append build params to index_path_prefix "
-                                       "(_R{R}_L{L}_B{B}_M{M}_PQd{PQ_disk}_PQb{PQ_build}_OPQ{0/1}_reord{0/1})");
+                                       "(_R{R}_L{L}_B{B}_M{M}[ _PQd{PQ_disk}][ _PQb{PQ_build}][ _OPQ][ _reord])");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -141,8 +141,15 @@ int main(int argc, char **argv)
     if (append_params_to_prefix)
     {
         std::ostringstream oss;
-        oss << index_path_prefix << "_R" << R << "_L" << L << "_B" << B << "_M" << M << "_PQd" << disk_PQ << "_PQb"
-            << build_PQ << "_OPQ" << (use_opq ? 1 : 0) << "_reord" << (append_reorder_data ? 1 : 0);
+        oss << index_path_prefix << "_R" << R << "_L" << L << "_B" << B << "_M" << M;
+        if (disk_PQ != 0)
+            oss << "_PQd" << disk_PQ;
+        if (build_PQ != 0)
+            oss << "_PQb" << build_PQ;
+        if (use_opq)
+            oss << "_OPQ";
+        if (append_reorder_data)
+            oss << "_reord";
         index_prefix = oss.str();
         std::cout << "Adjusted index_path_prefix to: " << index_prefix << std::endl;
     }
