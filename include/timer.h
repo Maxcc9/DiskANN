@@ -23,12 +23,19 @@ class Timer
 
     long long elapsed() const
     {
+        // Preserves existing integer-microsecond API for callers that expect truncation.
         return std::chrono::duration_cast<std::chrono::microseconds>(_clock::now() - check_point).count();
+    }
+
+    double elapsed_us_double() const
+    {
+        // High-precision microseconds (fractional) to avoid truncation of sub-microsecond work.
+        return std::chrono::duration<double, std::micro>(_clock::now() - check_point).count();
     }
 
     float elapsed_seconds() const
     {
-        return (float)elapsed() / 1000000.0f;
+        return (float)elapsed_us_double() / 1000000.0f;
     }
 
     std::string elapsed_seconds_for_step(const std::string &step) const
