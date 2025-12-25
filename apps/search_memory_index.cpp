@@ -25,31 +25,9 @@
 #include "program_options_utils.hpp"
 #include "index_factory.h"
 #include "percentile_stats.h"
+#include "search_stats.h"
 
 namespace po = boost::program_options;
-
-struct StatRow
-{
-    uint32_t L = 0;
-    double qps = 0;
-    double mean_latency = 0;
-    double latency_999 = 0;
-    double mean_cmps = 0;
-    bool has_recall = false;
-    double recall = 0;
-    double hop_mean = 0;
-    double hop_p50 = 0;
-    double hop_p90 = 0;
-    double hop_p95 = 0;
-    double hop_p99 = 0;
-    double hop_max = 0;
-    double visited_mean = 0;
-    double visited_p50 = 0;
-    double visited_p90 = 0;
-    double visited_p95 = 0;
-    double visited_p99 = 0;
-    double visited_max = 0;
-};
 
 template <typename T, typename LabelT = uint32_t>
 int search_memory_index(diskann::Metric &metric, const std::string &index_path, const std::string &result_path_prefix,
@@ -157,7 +135,7 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
     std::vector<std::vector<uint32_t>> query_result_ids(Lvec.size());
     std::vector<std::vector<float>> query_result_dists(Lvec.size());
     std::vector<diskann::QueryStats> stats(query_num);
-    std::vector<StatRow> stats_summary;
+    std::vector<diskann::MemoryStatRow> stats_summary;
     std::string per_query_csv_path =
         stats_csv_path.empty() ? result_path_prefix + "_query_stats.csv" : stats_csv_path;
     std::ofstream per_query_csv(per_query_csv_path, std::ios::out | std::ios::trunc);
@@ -314,7 +292,7 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
         auto visited_max = diskann::get_max_stats<uint32_t>(
             stats.data(), query_num, [](const diskann::QueryStats &s) { return s.visited_nodes; });
 
-        StatRow row;
+        diskann::MemoryStatRow row;
         row.L = L;
         row.qps = displayed_qps;
         row.mean_latency = mean_latency;
