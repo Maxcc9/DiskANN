@@ -1424,6 +1424,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         sector_scratch_idx = 0;
         // find new beam
         uint32_t num_seen = 0;
+
+        // 把要擴展的節點分別放到 frontier 和 cached_nhoods 兩個容器中，前者要從磁碟讀取，後者是快取命中
         while (retset.has_unexpanded_node() && frontier.size() < beam_width && num_seen < beam_width)
         {
             auto nbr = retset.closest_unexpanded();
@@ -1450,9 +1452,12 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         // read nhoods of frontier ids
         if (!frontier.empty())
         {
-            if (stats != nullptr)
-                stats->n_hops++;
-            for (uint64_t i = 0; i < frontier.size(); i++)
+            // Calculate budget remaining and limit frontier size
+            uint32_t io_budget = io_limit - num_ios;
+            uint32_t to_read = std::min((uint32_t)frontier.size(), io_budget);
+            
+            // Only process nodes within budget
+            for (uint64_t i = 0; i < to_read; i++)
             {
                 auto id = frontier[i];
                 std::pair<uint32_t, char *> fnhood;
@@ -1464,10 +1469,23 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                 num_sectors_per_node * defaults::SECTOR_LEN, fnhood.second);
                 if (stats != nullptr)
                 {
-                    stats->n_4k++;
-                    stats->n_ios++;
+                    uint64_t read_bytes = num_sectors_per_node * defaults::SECTOR_LEN;
+                    if (read_bytes == 4096)
+                        stats->n_4k++;
+                    else if (read_bytes == 8192)
+                        stats->n_8k++;
+                    else if (read_bytes == 12288)
+                        stats->n_12k++;
+                    else
+                        stats->n_16k++;
+                    
+                    stats->read_size += read_bytes;
                 }
                 num_ios++;
+            }
+            if (stats != nullptr)
+            {
+                stats->n_ios += to_read;  // Only count what was actually read
             }
             io_timer.reset();
 #ifdef USE_BING_INFRA
@@ -1478,7 +1496,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 #endif
             if (stats != nullptr)
             {
-                stats->io_us += (float)io_timer.elapsed();
+                stats->io_us += static_cast<float>(io_timer.elapsed_us_double());
             }
         }
 
@@ -1511,7 +1529,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             if (stats != nullptr)
             {
                 stats->n_cmps += (uint32_t)nnbrs;
-                stats->cpu_us += (float)cpu_timer.elapsed();
+                stats->cpu_us += static_cast<float>(cpu_timer.elapsed_us_double());
             }
 
             // process prefetched nhood
@@ -1526,7 +1544,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     if (use_filter && !(point_has_label(id, filter_label)) &&
                         (!_use_universal_label || !point_has_label(id, _universal_filter_label)))
                         continue;
-                    cmps++;
+                    // cmps++;
                     float dist = dist_scratch[m];
                     Neighbor nn(id, dist);
                     retset.insert(nn);
@@ -1573,7 +1591,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             if (stats != nullptr)
             {
                 stats->n_cmps += (uint32_t)nnbrs;
-                stats->cpu_us += (float)cpu_timer.elapsed();
+                stats->cpu_us += static_cast<float>(cpu_timer.elapsed_us_double());
             }
 
             cpu_timer.reset();
@@ -1589,13 +1607,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     if (use_filter && !(point_has_label(id, filter_label)) &&
                         (!_use_universal_label || !point_has_label(id, _universal_filter_label)))
                         continue;
-                    cmps++;
+                    // cmps++;
                     float dist = dist_scratch[m];
-                    if (stats != nullptr)
-                    {
-                        stats->n_cmps++;
-                    }
-
                     Neighbor nn(id, dist);
                     retset.insert(nn);
                 }
@@ -1603,7 +1616,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 
             if (stats != nullptr)
             {
-                stats->cpu_us += (float)cpu_timer.elapsed();
+                stats->cpu_us += static_cast<float>(cpu_timer.elapsed_us_double());
             }
         }
 
@@ -1612,12 +1625,18 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 
     if (stats != nullptr)
     {
-        stats->n_hops = hops;
-        stats->visited_nodes = static_cast<unsigned>(visited.size());
+        // Accumulate rather than overwrite to preserve external recordings
+        stats->n_hops += hops;
+        stats->visited_nodes += static_cast<unsigned>(visited.size());
     }
 
     // re-sort by distance
+    cpu_timer.reset();
     std::sort(full_retset.begin(), full_retset.end());
+    if (stats != nullptr)
+    {
+        stats->sort_us += static_cast<float>(cpu_timer.elapsed_us_double());
+    }
 
     if (use_reorder_data)
     {
@@ -1655,9 +1674,10 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 #endif
         if (stats != nullptr)
         {
-            stats->io_us += io_timer.elapsed();
+            stats->io_us += static_cast<float>(io_timer.elapsed_us_double());
         }
 
+        cpu_timer.reset();
         for (size_t i = 0; i < full_retset.size(); ++i)
         {
             auto id = full_retset[i].id;
@@ -1665,8 +1685,19 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             auto location = (sector_scratch + i * defaults::SECTOR_LEN) + VECTOR_SECTOR_OFFSET(id);
             full_retset[i].distance = _dist_cmp->compare(aligned_query_T, (T *)location, (uint32_t)this->_data_dim);
         }
+        if (stats != nullptr)
+        {
+            stats->reorder_cpu_us += static_cast<float>(cpu_timer.elapsed_us_double());
+            stats->n_cmps += (uint32_t)full_retset.size();
+        }
 
+        // Final sort by full-precision distance
+        cpu_timer.reset();
         std::sort(full_retset.begin(), full_retset.end());
+        if (stats != nullptr)
+        {
+            stats->reorder_cpu_us += static_cast<float>(cpu_timer.elapsed_us_double());
+        }
     }
 
     // copy k_search values
@@ -1700,7 +1731,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 
     if (stats != nullptr)
     {
-        stats->total_us = (float)query_timer.elapsed();
+        stats->total_us = static_cast<float>(query_timer.elapsed_us_double());
     }
 }
 
