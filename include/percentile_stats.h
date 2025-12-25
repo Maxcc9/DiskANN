@@ -23,18 +23,21 @@ struct QueryStats
 {
     float total_us = 0; // total time to process query in micros
     float io_us = 0;    // total time spent in IO (dram 快取命中不會增加 io_us)
-    float cpu_us = 0;   // total time spent in CPU
+    float cpu_us = 0;   // total time spent in CPU (PQ distance calculations + filtering)
+    float sort_us = 0;  // time spent sorting candidates after search
+    float reorder_cpu_us = 0;  // time spent in full-precision distance calculations and final sort
 
-    unsigned n_4k = 0;         // # of 4kB reads
-    unsigned n_8k = 0;         // # of 8kB reads (not implemented yet)
-    unsigned n_12k = 0;        // # of 12kB reads (not implemented yet)
-    unsigned n_ios = 0;        // total # of IOs issued
-    unsigned read_size = 0;    // total # of bytes read
-    unsigned n_cmps_saved = 0; // # cmps saved (not implemented yet)
-    unsigned n_cmps = 0;       // # cmps (查詢向量與候選節點作距離比較的次數)
-    unsigned n_cache_hits = 0; // # cache_hits (快取命中次數)
-    unsigned n_hops = 0;       // # search hops
-    unsigned visited_nodes = 0; // # unique visited nodes in search
+    uint64_t n_4k = 0;         // # of 4kB reads
+    uint64_t n_8k = 0;         // # of 8kB reads
+    uint64_t n_12k = 0;        // # of 12kB reads
+    uint64_t n_16k = 0;        // # of 16kB reads
+    uint64_t n_ios = 0;        // total # of IOs issued
+    uint64_t read_size = 0;    // total # of bytes read
+    uint64_t n_cmps_saved = 0; // # cmps saved (not implemented yet)
+    uint64_t n_cmps = 0;       // # cmps (查詢向量與候選節點作距離比較的次數)
+    uint64_t n_cache_hits = 0; // # cache_hits (快取命中次數)
+    uint64_t n_hops = 0;       // # search hops
+    uint64_t visited_nodes = 0; // # unique visited nodes in search
     unsigned thread_id = 0;     // thread executing the query
     unsigned recall_match_count = 0; // # of matches against ground truth @K
 };

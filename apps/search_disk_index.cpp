@@ -12,6 +12,7 @@
 #include "pq_flash_index.h"
 #include "timer.h"
 #include "percentile_stats.h"
+#include "search_stats.h"
 #include "program_options_utils.hpp"
 
 #include <fstream>
@@ -49,32 +50,6 @@ void print_stats(std::string category, std::vector<float> percentiles, std::vect
     }
     diskann::cout << std::endl;
 }
-
-struct StatRow
-{
-    uint32_t L = 0;
-    uint32_t beamwidth = 0;
-    double qps = 0;
-    double mean_latency = 0;
-    double latency_999 = 0;
-    double mean_ios = 0;
-    double mean_io_us = 0;
-    double mean_cpu_us = 0;
-    bool has_recall = false;
-    double recall = 0;
-    double hop_mean = 0;
-    double hop_p50 = 0;
-    double hop_p90 = 0;
-    double hop_p95 = 0;
-    double hop_p99 = 0;
-    double hop_max = 0;
-    double visited_mean = 0;
-    double visited_p50 = 0;
-    double visited_p90 = 0;
-    double visited_p95 = 0;
-    double visited_p99 = 0;
-    double visited_max = 0;
-};
 
 template <typename T, typename LabelT = uint32_t>
 int search_disk_index(diskann::Metric &metric, const std::string &index_path_prefix,
@@ -220,7 +195,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                      "================================================================="
                   << std::endl;
 
-    std::vector<StatRow> stats_summary;
+    std::vector<diskann::DiskStatRow> stats_summary;
     std::vector<std::vector<uint32_t>> query_result_ids(Lvec.size());
     std::vector<std::vector<float>> query_result_dists(Lvec.size());
 
@@ -255,6 +230,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             base = path.substr(pos + 1);
         }
     };
+
     auto get_basename = [](const std::string &path) {
         auto pos = path.find_last_of("/\\");
         if (pos == std::string::npos)
@@ -292,18 +268,22 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 
     double best_recall = 0.0;
     std::string per_query_csv_path = stats_csv_path;
+    
     if (per_query_csv_path.empty())
     {
-        per_query_csv_path = base_output_prefix(optimized_beamwidth) + "_query_stats.csv";
+        per_query_csv_path = base_output_prefix(optimized_beamwidth) + 
+        "_query_stats.csv";
     }
     std::ofstream per_query_csv(per_query_csv_path, std::ios::out | std::ios::trunc);
     if (!per_query_csv.is_open())
     {
-        diskann::cerr << "Failed to open per-query stats csv file: " << per_query_csv_path << std::endl;
+        diskann::cerr << "Failed to open per-query stats csv file: " << 
+        per_query_csv_path << std::endl;
     }
     else
     {
-        per_query_csv << "query_id,L,beamwidth,thread_id,total_us,io_us,cpu_us,n_ios,n_4k,n_cache_hits,n_hops,"
+        per_query_csv << "query_id,L,beamwidth,thread_id,total_us,io_us,cpu_us,sort_us,reorder_cpu_us,"
+                      << "n_ios,n_4k,n_8k,n_12k,n_16k,n_cache_hits,n_hops,"
                       << "visited_nodes,recall_match_count\n";
     }
 
@@ -398,6 +378,10 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 
         auto mean_cpuus = diskann::get_mean_stats<float>(stats, query_num,
                                                          [](const diskann::QueryStats &stats) { return stats.cpu_us; });
+        auto mean_sort_us = diskann::get_mean_stats<float>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.sort_us; });
+        auto mean_reorder_cpu_us = diskann::get_mean_stats<float>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.reorder_cpu_us; });
 
         auto mean_io_us = diskann::get_mean_stats<float>(stats, query_num,
                                                          [](const diskann::QueryStats &stats) { return stats.io_us; });
@@ -436,7 +420,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             best_recall = std::max(recall, best_recall);
         }
 
-        StatRow row;
+        diskann::DiskStatRow row;
         row.L = L;
         row.beamwidth = optimized_beamwidth;
         row.qps = qps;
@@ -445,6 +429,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         row.mean_ios = mean_ios;
         row.mean_io_us = mean_io_us;
         row.mean_cpu_us = mean_cpuus;
+        row.mean_sort_us = mean_sort_us;
+        row.mean_reorder_cpu_us = mean_reorder_cpu_us;
         row.has_recall = calc_recall_flag;
         row.recall = recall;
         row.hop_mean = hop_mean;
@@ -480,13 +466,15 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         {
             std::ostringstream oss;
             oss.setf(std::ios::fixed);
-            oss.precision(4);
+            oss.precision(3);
             for (uint32_t qi = 0; qi < query_num; qi++)
             {
                 stats[qi].recall_match_count = compute_recall_matches(qi, test_id);
                 oss << qi << "," << L << "," << optimized_beamwidth << "," << stats[qi].thread_id << ","
-                    << stats[qi].total_us << "," << stats[qi].io_us << "," << stats[qi].cpu_us << "," << stats[qi].n_ios
-                    << "," << stats[qi].n_4k << "," << stats[qi].n_cache_hits << "," << stats[qi].n_hops << ","
+                    << stats[qi].total_us << "," << stats[qi].io_us << "," << stats[qi].cpu_us << ","
+                    << stats[qi].sort_us << "," << stats[qi].reorder_cpu_us << ","
+                    << stats[qi].n_ios << "," << stats[qi].n_4k << "," << stats[qi].n_8k << "," << stats[qi].n_12k
+                    << "," << stats[qi].n_16k << "," << stats[qi].n_cache_hits << "," << stats[qi].n_hops << ","
                     << stats[qi].visited_nodes << "," << stats[qi].recall_match_count << "\n";
             }
             per_query_csv << oss.str();
@@ -502,15 +490,15 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     }
     else
     {
-        csv_stream << "L,beamwidth,qps,mean_latency_us,latency_p999_us,mean_ios,mean_io_us,mean_cpu_us,recall,"
+        csv_stream << "L,beamwidth,qps,mean_latency_us,latency_p999_us,mean_ios,mean_io_us,mean_cpu_us,mean_sort_us,mean_reorder_cpu_us,recall,"
                    << "hop_mean,hop_p50,hop_p90,hop_p95,hop_p99,hop_max,"
                    << "visited_mean,visited_p50,visited_p90,visited_p95,visited_p99,visited_max\n";
-        csv_stream << std::fixed << std::setprecision(4);
+        csv_stream << std::fixed << std::setprecision(3);
         for (const auto &row : stats_summary)
         {
             csv_stream << row.L << "," << row.beamwidth << "," << row.qps << "," << row.mean_latency << ","
                        << row.latency_999 << "," << row.mean_ios << "," << row.mean_io_us << "," << row.mean_cpu_us
-                       << ",";
+                       << "," << row.mean_sort_us << "," << row.mean_reorder_cpu_us << ",";
             if (row.has_recall)
             {
                 csv_stream << row.recall;
