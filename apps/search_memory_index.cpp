@@ -145,8 +145,8 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
     }
     else
     {
-        per_query_csv << "query_id,L,beamwidth,thread_id,total_us,io_us,cpu_us,n_ios,read_size,n_cache_hits,n_hops,"
-                      << "visited_nodes,recall_match_count\n";
+        per_query_csv << "query_id,L,beamwidth,thread_id,total_us,io_us,cpu_us,n_ios,read_size,n_cmps,n_cache_hits,"
+                      << "n_hops,visited_nodes,recall_match_count\n";
     }
 
     auto compute_recall_matches = [&](uint32_t query_idx, uint32_t test_id) -> uint32_t {
@@ -298,7 +298,6 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
         row.mean_latency = mean_latency;
         row.latency_999 = latency_999;
         row.mean_cmps = mean_cmps;
-        row.has_recall = calc_recall_flag;
         if (!recalls.empty())
             row.recall = recalls.back();
         row.hop_mean = hop_mean;
@@ -347,8 +346,9 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
                 stats[qi].recall_match_count = compute_recall_matches(qi, test_id);
                 oss << qi << "," << L << "," << L << "," << stats[qi].thread_id << "," << stats[qi].total_us << ","
                     << stats[qi].io_us << "," << stats[qi].cpu_us << "," << stats[qi].n_ios << ","
-                    << stats[qi].read_size << "," << stats[qi].n_cache_hits << "," << stats[qi].n_hops << ","
-                    << stats[qi].visited_nodes << "," << stats[qi].recall_match_count << "\n";
+                    << stats[qi].read_size << "," << stats[qi].n_cmps << "," << stats[qi].n_cache_hits << ","
+                    << stats[qi].n_hops << "," << stats[qi].visited_nodes << "," << stats[qi].recall_match_count
+                    << "\n";
             }
             per_query_csv << oss.str();
         }
@@ -370,7 +370,7 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
         {
             csv_stream << row.L << "," << row.qps << "," << row.mean_latency << "," << row.latency_999 << ","
                        << row.mean_cmps << ",";
-            if (row.has_recall)
+            if (calc_recall_flag)
             {
                 csv_stream << row.recall;
             }

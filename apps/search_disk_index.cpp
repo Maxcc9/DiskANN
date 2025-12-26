@@ -3,6 +3,8 @@
 
 #include "common_includes.h"
 #include <boost/program_options.hpp>
+#include <regex>
+#include <type_traits>
 
 #include "index.h"
 #include "disk_utils.h"
@@ -131,6 +133,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     //     _pFlashIndex->generate_cache_list_from_sample_queries(warmup_query_file, 15, 6, num_nodes_to_cache,
     //     num_threads, node_list);
     _pFlashIndex->load_cache_list(node_list);
+    const uint32_t actual_cached_nodes = static_cast<uint32_t>(node_list.size());
     node_list.clear();
     node_list.shrink_to_fit();
 
@@ -242,6 +245,50 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     split_dir_and_base(result_output_prefix, result_dir, user_prefix);
     const std::string index_basename = get_basename(index_path_prefix);
 
+    struct ParsedIndexParams
+    {
+        std::string dataset_name;
+        uint32_t build_R = 0;
+        uint32_t build_L = 0;
+        double build_B = 0;
+        double build_M = 0;
+    };
+
+    auto parse_index_params = [](const std::string &basename) {
+        ParsedIndexParams params;
+        params.dataset_name = basename;
+
+        std::smatch match;
+        const std::regex r_regex(R"(_R(\d+))");
+        const std::regex l_regex(R"(_L(\d+))");
+        const std::regex b_regex(R"(_B([0-9eE+.\-]+))");
+        const std::regex m_regex(R"(_M(\d+))");
+
+        if (std::regex_search(basename, match, r_regex))
+        {
+            params.build_R = static_cast<uint32_t>(std::stoul(match[1].str()));
+            if (match.position(0) > 0)
+            {
+                params.dataset_name = basename.substr(0, match.position(0));
+            }
+        }
+        if (std::regex_search(basename, match, l_regex))
+        {
+            params.build_L = static_cast<uint32_t>(std::stoul(match[1].str()));
+        }
+        if (std::regex_search(basename, match, b_regex))
+        {
+            params.build_B = std::stod(match[1].str());
+        }
+        if (std::regex_search(basename, match, m_regex))
+        {
+            params.build_M = std::stod(match[1].str());
+        }
+        return params;
+    };
+
+    const auto index_params = parse_index_params(index_basename);
+
     auto build_param_suffix = [&](uint32_t bw_value) {
         std::ostringstream oss;
         if (append_search_params)
@@ -283,7 +330,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     else
     {
         per_query_csv << "query_id,L,beamwidth,thread_id,total_us,io_us,cpu_us,sort_us,reorder_cpu_us,"
-                      << "n_ios,n_4k,n_8k,n_12k,n_16k,n_cache_hits,n_hops,"
+                      << "n_ios,n_4k,n_8k,n_12k,n_16k,read_size,n_cmps,n_cache_hits,n_hops,"
                       << "visited_nodes,recall_match_count\n";
     }
 
@@ -367,11 +414,21 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         diskann::convert_types<uint64_t, uint32_t>(query_result_ids_64.data(), query_result_ids[test_id].data(),
                                                    query_num, recall_at);
 
+        if (calc_recall_flag)
+        {
+            for (uint32_t qi = 0; qi < query_num; qi++)
+            {
+                stats[qi].recall_match_count = compute_recall_matches(qi, test_id);
+            }
+        }
+
         auto mean_latency = diskann::get_mean_stats<float>(
             stats, query_num, [](const diskann::QueryStats &stats) { return stats.total_us; });
 
         auto latency_p50 = diskann::get_percentile_stats<float>(
             stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return stats.total_us; });
+        auto latency_p75 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.75f, [](const diskann::QueryStats &stats) { return stats.total_us; });
         auto latency_p90 = diskann::get_percentile_stats<float>(
             stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return stats.total_us; });
         auto latency_p95 = diskann::get_percentile_stats<float>(
@@ -383,23 +440,155 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         auto latency_max = diskann::get_max_stats<float>(
             stats, query_num, [](const diskann::QueryStats &stats) { return stats.total_us; });
 
-        auto mean_ios = diskann::get_mean_stats<uint32_t>(stats, query_num,
-                                                          [](const diskann::QueryStats &stats) { return stats.n_ios; });
+        auto mean_ios = diskann::get_mean_stats<double>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_ios); });
+        auto ios_p50 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_ios); });
+        auto ios_p75 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.75f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_ios); });
+        auto ios_p90 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_ios); });
+        auto ios_p95 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.95f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_ios); });
+        auto ios_p99 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.99f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_ios); });
+        auto ios_max = diskann::get_max_stats<double>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_ios); });
 
-        auto mean_cpuus = diskann::get_mean_stats<float>(stats, query_num,
-                                                         [](const diskann::QueryStats &stats) { return stats.cpu_us; });
+        auto mean_cpuus =
+            diskann::get_mean_stats<float>(stats, query_num, [](const diskann::QueryStats &stats) {
+                return stats.cpu_us;
+            });
+        auto cpu_us_p50 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return stats.cpu_us; });
+        auto cpu_us_p75 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.75f, [](const diskann::QueryStats &stats) { return stats.cpu_us; });
+        auto cpu_us_p90 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return stats.cpu_us; });
+        auto cpu_us_p95 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.95f, [](const diskann::QueryStats &stats) { return stats.cpu_us; });
+        auto cpu_us_p99 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.99f, [](const diskann::QueryStats &stats) { return stats.cpu_us; });
+        auto cpu_us_max = diskann::get_max_stats<float>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.cpu_us; });
+
         auto mean_sort_us = diskann::get_mean_stats<float>(
             stats, query_num, [](const diskann::QueryStats &stats) { return stats.sort_us; });
-        auto mean_reorder_cpu_us = diskann::get_mean_stats<float>(
-            stats, query_num, [](const diskann::QueryStats &stats) { return stats.reorder_cpu_us; });
+        auto sort_us_p50 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return stats.sort_us; });
+        auto sort_us_p75 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.75f, [](const diskann::QueryStats &stats) { return stats.sort_us; });
+        auto sort_us_p90 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return stats.sort_us; });
+        auto sort_us_p95 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.95f, [](const diskann::QueryStats &stats) { return stats.sort_us; });
+        auto sort_us_p99 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.99f, [](const diskann::QueryStats &stats) { return stats.sort_us; });
+        auto sort_us_max = diskann::get_max_stats<float>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.sort_us; });
 
-        auto mean_io_us = diskann::get_mean_stats<float>(stats, query_num,
-                                                         [](const diskann::QueryStats &stats) { return stats.io_us; });
+        auto mean_io_us = diskann::get_mean_stats<float>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.io_us; });
+        auto io_us_p50 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return stats.io_us; });
+        auto io_us_p75 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.75f, [](const diskann::QueryStats &stats) { return stats.io_us; });
+        auto io_us_p90 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return stats.io_us; });
+        auto io_us_p95 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.95f, [](const diskann::QueryStats &stats) { return stats.io_us; });
+        auto io_us_p99 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.99f, [](const diskann::QueryStats &stats) { return stats.io_us; });
+        auto io_us_max = diskann::get_max_stats<float>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.io_us; });
+
+        auto read_size_mean = diskann::get_mean_stats<double>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.read_size); });
+        auto read_size_p50 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.read_size); });
+        auto read_size_p75 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.75f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.read_size); });
+        auto read_size_p90 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.read_size); });
+        auto read_size_p95 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.95f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.read_size); });
+        auto read_size_p99 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.99f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.read_size); });
+        auto read_size_max = diskann::get_max_stats<double>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.read_size); });
+
+        auto compares_mean = diskann::get_mean_stats<double>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_cmps); });
+        auto compares_p50 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_cmps); });
+        auto compares_p75 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.75f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_cmps); });
+        auto compares_p90 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_cmps); });
+        auto compares_p95 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.95f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_cmps); });
+        auto compares_p99 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.99f, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_cmps); });
+        auto compares_max = diskann::get_max_stats<double>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return static_cast<double>(stats.n_cmps); });
+
+        auto cache_hit_rate_mean = diskann::get_mean_stats<double>(
+            stats, query_num, [](const diskann::QueryStats &stats) {
+                const double denom = static_cast<double>(stats.n_ios + stats.n_cache_hits);
+                return denom > 0.0 ? static_cast<double>(stats.n_cache_hits) / denom : 0.0;
+            });
+        auto cache_hit_rate_p0 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.0f, [](const diskann::QueryStats &stats) {
+                const double denom = static_cast<double>(stats.n_ios + stats.n_cache_hits);
+                return denom > 0.0 ? static_cast<double>(stats.n_cache_hits) / denom : 0.0;
+            });
+        auto cache_hit_rate_p1 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.01f, [](const diskann::QueryStats &stats) {
+                const double denom = static_cast<double>(stats.n_ios + stats.n_cache_hits);
+                return denom > 0.0 ? static_cast<double>(stats.n_cache_hits) / denom : 0.0;
+            });
+        auto cache_hit_rate_p5 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.05f, [](const diskann::QueryStats &stats) {
+                const double denom = static_cast<double>(stats.n_ios + stats.n_cache_hits);
+                return denom > 0.0 ? static_cast<double>(stats.n_cache_hits) / denom : 0.0;
+            });
+        auto cache_hit_rate_p10 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.1f, [](const diskann::QueryStats &stats) {
+                const double denom = static_cast<double>(stats.n_ios + stats.n_cache_hits);
+                return denom > 0.0 ? static_cast<double>(stats.n_cache_hits) / denom : 0.0;
+            });
+        auto cache_hit_rate_p25 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.25f, [](const diskann::QueryStats &stats) {
+                const double denom = static_cast<double>(stats.n_ios + stats.n_cache_hits);
+                return denom > 0.0 ? static_cast<double>(stats.n_cache_hits) / denom : 0.0;
+            });
+        auto cache_hit_rate_p50 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.5f, [](const diskann::QueryStats &stats) {
+                const double denom = static_cast<double>(stats.n_ios + stats.n_cache_hits);
+                return denom > 0.0 ? static_cast<double>(stats.n_cache_hits) / denom : 0.0;
+            });
+        auto cache_hit_rate_p75 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.75f, [](const diskann::QueryStats &stats) {
+                const double denom = static_cast<double>(stats.n_ios + stats.n_cache_hits);
+                return denom > 0.0 ? static_cast<double>(stats.n_cache_hits) / denom : 0.0;
+            });
+        auto cache_hit_rate_p90 = diskann::get_percentile_stats<double>(
+            stats, query_num, 0.9f, [](const diskann::QueryStats &stats) {
+                const double denom = static_cast<double>(stats.n_ios + stats.n_cache_hits);
+                return denom > 0.0 ? static_cast<double>(stats.n_cache_hits) / denom : 0.0;
+            });
+        auto cache_hit_rate_max = diskann::get_max_stats<double>(
+            stats, query_num, [](const diskann::QueryStats &stats) {
+                const double denom = static_cast<double>(stats.n_ios + stats.n_cache_hits);
+                return denom > 0.0 ? static_cast<double>(stats.n_cache_hits) / denom : 0.0;
+            });
 
         auto hop_mean = diskann::get_mean_stats<uint32_t>(
             stats, query_num, [](const diskann::QueryStats &stats) { return stats.n_hops; });
         auto hop_p50 = diskann::get_percentile_stats<uint32_t>(
             stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return stats.n_hops; });
+        auto hop_p75 = diskann::get_percentile_stats<uint32_t>(
+            stats, query_num, 0.75f, [](const diskann::QueryStats &stats) { return stats.n_hops; });
         auto hop_p90 = diskann::get_percentile_stats<uint32_t>(
             stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return stats.n_hops; });
         auto hop_p95 = diskann::get_percentile_stats<uint32_t>(
@@ -413,6 +602,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             stats, query_num, [](const diskann::QueryStats &stats) { return stats.visited_nodes; });
         auto visited_p50 = diskann::get_percentile_stats<uint32_t>(
             stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return stats.visited_nodes; });
+        auto visited_p75 = diskann::get_percentile_stats<uint32_t>(
+            stats, query_num, 0.75f, [](const diskann::QueryStats &stats) { return stats.visited_nodes; });
         auto visited_p90 = diskann::get_percentile_stats<uint32_t>(
             stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return stats.visited_nodes; });
         auto visited_p95 = diskann::get_percentile_stats<uint32_t>(
@@ -422,40 +613,142 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         auto visited_max = diskann::get_max_stats<uint32_t>(
             stats, query_num, [](const diskann::QueryStats &stats) { return stats.visited_nodes; });
 
-        double recall = 0;
+        double recall_mean = 0;
+        double recall_p0 = 0;
+        double recall_p1 = 0;
+        double recall_p5 = 0;
+        double recall_p10 = 0;
+        double recall_p25 = 0;
+        double recall_p50 = 0;
+        double recall_p75 = 0;
+        double recall_p90 = 0;
+        double recall_max = 0;
         if (calc_recall_flag)
         {
-            recall = diskann::calculate_recall((uint32_t)query_num, gt_ids, gt_dists, (uint32_t)gt_dim,
-                                               query_result_ids[test_id].data(), recall_at, recall_at);
-            best_recall = std::max(recall, best_recall);
+            auto recall_ratio = [recall_at](const diskann::QueryStats &stats) {
+                return static_cast<double>(stats.recall_match_count) / static_cast<double>(recall_at);
+            };
+            recall_mean = diskann::get_mean_stats<double>(stats, query_num, recall_ratio);
+            recall_p0 = diskann::get_percentile_stats<double>(stats, query_num, 0.0f, recall_ratio);
+            recall_p1 = diskann::get_percentile_stats<double>(stats, query_num, 0.01f, recall_ratio);
+            recall_p5 = diskann::get_percentile_stats<double>(stats, query_num, 0.05f, recall_ratio);
+            recall_p10 = diskann::get_percentile_stats<double>(stats, query_num, 0.1f, recall_ratio);
+            recall_p25 = diskann::get_percentile_stats<double>(stats, query_num, 0.25f, recall_ratio);
+            recall_p50 = diskann::get_percentile_stats<double>(stats, query_num, 0.5f, recall_ratio);
+            recall_p75 = diskann::get_percentile_stats<double>(stats, query_num, 0.75f, recall_ratio);
+            recall_p90 = diskann::get_percentile_stats<double>(stats, query_num, 0.9f, recall_ratio);
+            recall_max = diskann::get_max_stats<double>(stats, query_num, recall_ratio);
+            best_recall = std::max(recall_mean, best_recall);
         }
 
         diskann::DiskStatRow row;
-        row.L = L;
-        row.beamwidth = optimized_beamwidth;
+        if (std::is_same<T, float>::value)
+        {
+            row.data_type = "float";
+        }
+        else if (std::is_same<T, int8_t>::value)
+        {
+            row.data_type = "int8";
+        }
+        else
+        {
+            row.data_type = "uint8";
+        }
+        row.search_K = recall_at;
+        row.search_L = L;
+        row.search_W = optimized_beamwidth;
+        row.search_T = num_threads;
+        row.search_io_limit = search_io_limit;
+        row.dataset_name = index_params.dataset_name;
+        row.build_R = index_params.build_R;
+        row.build_L = index_params.build_L;
+        row.build_B = index_params.build_B;
+        row.build_M = index_params.build_M;
+        row.num_queries = static_cast<uint32_t>(query_num);
+        row.dataset_size = static_cast<uint32_t>(_pFlashIndex->get_num_points());
+        row.vector_dim = static_cast<uint32_t>(_pFlashIndex->get_data_dim());
+        row.actual_cached_nodes = actual_cached_nodes;
         row.qps = qps;
         row.mean_latency = mean_latency;
         row.latency_p50 = latency_p50;
+        row.latency_p75 = latency_p75;
         row.latency_p90 = latency_p90;
         row.latency_p95 = latency_p95;
         row.latency_p99 = latency_p99;
         row.latency_999 = latency_999;
         row.latency_max = latency_max;
-        row.mean_ios = mean_ios;
-        row.mean_io_us = mean_io_us;
-        row.mean_cpu_us = mean_cpuus;
-        row.mean_sort_us = mean_sort_us;
-        row.mean_reorder_cpu_us = mean_reorder_cpu_us;
-        row.has_recall = calc_recall_flag;
-        row.recall = recall;
+        row.ios_mean = mean_ios;
+        row.ios_p50 = ios_p50;
+        row.ios_p75 = ios_p75;
+        row.ios_p90 = ios_p90;
+        row.ios_p95 = ios_p95;
+        row.ios_p99 = ios_p99;
+        row.ios_max = ios_max;
+        row.io_us_mean = mean_io_us;
+        row.io_us_p50 = io_us_p50;
+        row.io_us_p75 = io_us_p75;
+        row.io_us_p90 = io_us_p90;
+        row.io_us_p95 = io_us_p95;
+        row.io_us_p99 = io_us_p99;
+        row.io_us_max = io_us_max;
+        row.cpu_us_mean = mean_cpuus;
+        row.cpu_us_p50 = cpu_us_p50;
+        row.cpu_us_p75 = cpu_us_p75;
+        row.cpu_us_p90 = cpu_us_p90;
+        row.cpu_us_p95 = cpu_us_p95;
+        row.cpu_us_p99 = cpu_us_p99;
+        row.cpu_us_max = cpu_us_max;
+        row.sort_us_mean = mean_sort_us;
+        row.sort_us_p50 = sort_us_p50;
+        row.sort_us_p75 = sort_us_p75;
+        row.sort_us_p90 = sort_us_p90;
+        row.sort_us_p95 = sort_us_p95;
+        row.sort_us_p99 = sort_us_p99;
+        row.sort_us_max = sort_us_max;
+        row.read_size_mean = read_size_mean;
+        row.read_size_p50 = read_size_p50;
+        row.read_size_p75 = read_size_p75;
+        row.read_size_p90 = read_size_p90;
+        row.read_size_p95 = read_size_p95;
+        row.read_size_p99 = read_size_p99;
+        row.read_size_max = read_size_max;
+        row.compares_mean = compares_mean;
+        row.compares_p50 = compares_p50;
+        row.compares_p75 = compares_p75;
+        row.compares_p90 = compares_p90;
+        row.compares_p95 = compares_p95;
+        row.compares_p99 = compares_p99;
+        row.compares_max = compares_max;
+        row.recall_mean = recall_mean;
+        row.recall_p0 = recall_p0;
+        row.recall_p1 = recall_p1;
+        row.recall_p5 = recall_p5;
+        row.recall_p10 = recall_p10;
+        row.recall_p25 = recall_p25;
+        row.recall_p50 = recall_p50;
+        row.recall_p75 = recall_p75;
+        row.recall_p90 = recall_p90;
+        row.recall_max = recall_max;
+        row.cache_hit_rate_mean = cache_hit_rate_mean;
+        row.cache_hit_rate_p0 = cache_hit_rate_p0;
+        row.cache_hit_rate_p1 = cache_hit_rate_p1;
+        row.cache_hit_rate_p5 = cache_hit_rate_p5;
+        row.cache_hit_rate_p10 = cache_hit_rate_p10;
+        row.cache_hit_rate_p25 = cache_hit_rate_p25;
+        row.cache_hit_rate_p50 = cache_hit_rate_p50;
+        row.cache_hit_rate_p75 = cache_hit_rate_p75;
+        row.cache_hit_rate_p90 = cache_hit_rate_p90;
+        row.cache_hit_rate_max = cache_hit_rate_max;
         row.hop_mean = hop_mean;
         row.hop_p50 = hop_p50;
+        row.hop_p75 = hop_p75;
         row.hop_p90 = hop_p90;
         row.hop_p95 = hop_p95;
         row.hop_p99 = hop_p99;
         row.hop_max = hop_max;
         row.visited_mean = visited_mean;
         row.visited_p50 = visited_p50;
+        row.visited_p75 = visited_p75;
         row.visited_p90 = visited_p90;
         row.visited_p95 = visited_p95;
         row.visited_p99 = visited_p99;
@@ -467,15 +760,15 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       << std::setw(16) << mean_io_us << std::setw(16) << mean_cpuus;
         if (calc_recall_flag)
         {
-            diskann::cout << std::setw(16) << recall << std::endl;
+            diskann::cout << std::setw(16) << recall_mean << std::endl;
         }
         else
             diskann::cout << std::endl;
 
-        diskann::cout << "    HopCount mean/median/p90/p95/p99/max: " << hop_mean << "/" << hop_p50 << "/" << hop_p90
-                      << "/" << hop_p95 << "/" << hop_p99 << "/" << hop_max << std::endl;
-        diskann::cout << "    VisitedNodes mean/median/p90/p95/p99/max: " << visited_mean << "/" << visited_p50 << "/"
-                      << visited_p90 << "/" << visited_p95 << "/" << visited_p99 << "/" << visited_max << std::endl;
+        // diskann::cout << "    HopCount mean/median/p90/p95/p99/max: " << hop_mean << "/" << hop_p50 << "/" << hop_p90
+        //               << "/" << hop_p95 << "/" << hop_p99 << "/" << hop_max << std::endl;
+        // diskann::cout << "    VisitedNodes mean/median/p90/p95/p99/max: " << visited_mean << "/" << visited_p50 << "/"
+        //               << visited_p90 << "/" << visited_p95 << "/" << visited_p99 << "/" << visited_max << std::endl;
 
         if (per_query_csv.is_open())
         {
@@ -489,8 +782,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                     << stats[qi].total_us << "," << stats[qi].io_us << "," << stats[qi].cpu_us << ","
                     << stats[qi].sort_us << "," << stats[qi].reorder_cpu_us << ","
                     << stats[qi].n_ios << "," << stats[qi].n_4k << "," << stats[qi].n_8k << "," << stats[qi].n_12k
-                    << "," << stats[qi].n_16k << "," << stats[qi].n_cache_hits << "," << stats[qi].n_hops << ","
-                    << stats[qi].visited_nodes << "," << stats[qi].recall_match_count << "\n";
+                    << "," << stats[qi].n_16k << "," << stats[qi].read_size << "," << stats[qi].n_cmps << ","
+                    << stats[qi].n_cache_hits << "," << stats[qi].n_hops << "," << stats[qi].visited_nodes << ","
+                    << stats[qi].recall_match_count << "\n";
             }
             per_query_csv << oss.str();
         }
@@ -505,24 +799,61 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     }
     else
     {
-        csv_stream << "L,beamwidth,qps,mean_latency_us,latency_p50_us,latency_p90_us,latency_p95_us,latency_p99_us,latency_p999_us,latency_max_us,mean_ios,mean_io_us,mean_cpu_us,mean_sort_us,mean_reorder_cpu_us,recall,"
-                   << "hop_mean,hop_p50,hop_p90,hop_p95,hop_p99,hop_max,"
-                   << "visited_mean,visited_p50,visited_p90,visited_p95,visited_p99,visited_max\n";
-        csv_stream << std::fixed << std::setprecision(3);
+        csv_stream << "dataset_name,data_type,build_R,build_L,build_B,build_M,search_K,search_L,search_W,search_T,"
+                      "search_io_limit,num_queries,dataset_size,vector_dim,actual_cached_nodes,qps,"
+                      "out_degree_mean,out_degree_p0,out_degree_p1,out_degree_p5,out_degree_p10,out_degree_p25,"
+                      "out_degree_p50,out_degree_p75,out_degree_p90,out_degree_p95,out_degree_p99,out_degree_max,"
+                      "mean_latency_us,latency_p50_us,latency_p75_us,latency_p90_us,latency_p95_us,latency_p99_us,"
+                      "latency_p999_us,latency_max_us,ios_mean,ios_p50,ios_p75,ios_p90,ios_p95,ios_p99,ios_max,"
+                      "io_us_mean,io_us_p50,io_us_p75,io_us_p90,io_us_p95,io_us_p99,io_us_max,"
+                      "cpu_us_mean,cpu_us_p50,cpu_us_p75,cpu_us_p90,cpu_us_p95,cpu_us_p99,cpu_us_max,"
+                      "sort_us_mean,sort_us_p50,sort_us_p75,sort_us_p90,sort_us_p95,sort_us_p99,sort_us_max,"
+                      "read_size_mean,read_size_p50,read_size_p75,read_size_p90,read_size_p95,read_size_p99,"
+                      "read_size_max,compares_mean,compares_p50,compares_p75,compares_p90,compares_p95,compares_p99,"
+                      "compares_max,recall_mean,recall_p0,recall_p1,recall_p5,recall_p10,recall_p25,"
+                      "recall_p50,recall_p75,recall_p90,recall_max,cache_hit_rate_mean,cache_hit_rate_p0,"
+                      "cache_hit_rate_p1,cache_hit_rate_p5,cache_hit_rate_p10,cache_hit_rate_p25,cache_hit_rate_p50,"
+                      "cache_hit_rate_p75,cache_hit_rate_p90,cache_hit_rate_max,hop_mean,hop_p50,hop_p75,hop_p90,"
+                      "hop_p95,hop_p99,hop_max,visited_mean,visited_p50,visited_p75,visited_p90,visited_p95,"
+                      "visited_p99,visited_max\n";
+        csv_stream << std::fixed << std::setprecision(4);
         for (const auto &row : stats_summary)
         {
-            csv_stream << row.L << "," << row.beamwidth << "," << row.qps << "," << row.mean_latency << ","
-                       << row.latency_p50 << "," << row.latency_p90 << "," << row.latency_p95 << "," << row.latency_p99 << ","
-                       << row.latency_999 << "," << row.latency_max << "," << row.mean_ios << "," << row.mean_io_us << "," << row.mean_cpu_us
-                       << "," << row.mean_sort_us << "," << row.mean_reorder_cpu_us << ",";
-            if (row.has_recall)
-            {
-                csv_stream << row.recall;
-            }
-            csv_stream << "," << row.hop_mean << "," << row.hop_p50 << "," << row.hop_p90 << "," << row.hop_p95 << ","
-                       << row.hop_p99 << "," << row.hop_max << "," << row.visited_mean << "," << row.visited_p50 << ","
-                       << row.visited_p90 << "," << row.visited_p95 << "," << row.visited_p99 << "," << row.visited_max
-                       << "\n";
+            csv_stream << row.dataset_name << "," << row.data_type << "," << row.build_R << "," << row.build_L << ","
+                       << row.build_B << "," << row.build_M << "," << row.search_K << "," << row.search_L << ","
+                       << row.search_W << "," << row.search_T << "," << row.search_io_limit << "," << row.num_queries
+                       << ","
+                       << row.dataset_size << "," << row.vector_dim << "," << row.actual_cached_nodes << ","
+                       << row.qps << "," << row.out_degree_mean << "," << row.out_degree_p0 << "," << row.out_degree_p1
+                       << "," << row.out_degree_p5 << "," << row.out_degree_p10 << "," << row.out_degree_p25 << ","
+                       << row.out_degree_p50 << "," << row.out_degree_p75 << "," << row.out_degree_p90 << ","
+                       << row.out_degree_p95 << "," << row.out_degree_p99 << "," << row.out_degree_max << ","
+                       << row.mean_latency << "," << row.latency_p50 << "," << row.latency_p75 << "," << row.latency_p90
+                       << "," << row.latency_p95 << "," << row.latency_p99 << "," << row.latency_999 << ","
+                       << row.latency_max << "," << row.ios_mean << "," << row.ios_p50 << "," << row.ios_p75 << ","
+                       << row.ios_p90 << "," << row.ios_p95 << "," << row.ios_p99 << "," << row.ios_max << ","
+                       << row.io_us_mean << "," << row.io_us_p50 << "," << row.io_us_p75 << "," << row.io_us_p90
+                       << "," << row.io_us_p95 << "," << row.io_us_p99 << "," << row.io_us_max << ","
+                       << row.cpu_us_mean << "," << row.cpu_us_p50 << "," << row.cpu_us_p75 << "," << row.cpu_us_p90
+                       << "," << row.cpu_us_p95 << "," << row.cpu_us_p99 << "," << row.cpu_us_max << ","
+                       << row.sort_us_mean << "," << row.sort_us_p50 << "," << row.sort_us_p75 << ","
+                       << row.sort_us_p90 << "," << row.sort_us_p95 << "," << row.sort_us_p99 << ","
+                       << row.sort_us_max << "," << row.read_size_mean << "," << row.read_size_p50 << ","
+                       << row.read_size_p75 << "," << row.read_size_p90 << "," << row.read_size_p95 << ","
+                       << row.read_size_p99 << "," << row.read_size_max << "," << row.compares_mean << ","
+                       << row.compares_p50 << "," << row.compares_p75 << "," << row.compares_p90 << ","
+                       << row.compares_p95 << "," << row.compares_p99 << "," << row.compares_max << ","
+                       << row.recall_mean << "," << row.recall_p0 << "," << row.recall_p1
+                       << "," << row.recall_p5 << "," << row.recall_p10 << "," << row.recall_p25 << ","
+                       << row.recall_p50 << "," << row.recall_p75 << "," << row.recall_p90 << "," << row.recall_max
+                       << "," << row.cache_hit_rate_mean << "," << row.cache_hit_rate_p0 << ","
+                       << row.cache_hit_rate_p1 << "," << row.cache_hit_rate_p5 << "," << row.cache_hit_rate_p10
+                       << "," << row.cache_hit_rate_p25 << "," << row.cache_hit_rate_p50 << ","
+                       << row.cache_hit_rate_p75 << "," << row.cache_hit_rate_p90 << "," << row.cache_hit_rate_max
+                       << "," << row.hop_mean << "," << row.hop_p50 << "," << row.hop_p75 << "," << row.hop_p90
+                       << "," << row.hop_p95 << "," << row.hop_p99 << "," << row.hop_max << "," << row.visited_mean
+                       << "," << row.visited_p50 << "," << row.visited_p75 << "," << row.visited_p90 << ","
+                       << row.visited_p95 << "," << row.visited_p99 << "," << row.visited_max << "\n";
         }
     }
 
