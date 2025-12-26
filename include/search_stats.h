@@ -38,7 +38,12 @@ struct DiskStatRow
     uint32_t beamwidth = 0;
     double qps = 0;
     double mean_latency = 0;
+    double latency_p50 = 0;
+    double latency_p90 = 0;
+    double latency_p95 = 0;
+    double latency_p99 = 0;
     double latency_999 = 0;
+    double latency_max = 0;
     double mean_ios = 0;
     double mean_io_us = 0;
     double mean_cpu_us = 0;

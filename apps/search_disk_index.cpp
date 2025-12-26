@@ -370,8 +370,18 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         auto mean_latency = diskann::get_mean_stats<float>(
             stats, query_num, [](const diskann::QueryStats &stats) { return stats.total_us; });
 
+        auto latency_p50 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.5f, [](const diskann::QueryStats &stats) { return stats.total_us; });
+        auto latency_p90 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.9f, [](const diskann::QueryStats &stats) { return stats.total_us; });
+        auto latency_p95 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.95f, [](const diskann::QueryStats &stats) { return stats.total_us; });
+        auto latency_p99 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.99f, [](const diskann::QueryStats &stats) { return stats.total_us; });
         auto latency_999 = diskann::get_percentile_stats<float>(
             stats, query_num, 0.999, [](const diskann::QueryStats &stats) { return stats.total_us; });
+        auto latency_max = diskann::get_max_stats<float>(
+            stats, query_num, [](const diskann::QueryStats &stats) { return stats.total_us; });
 
         auto mean_ios = diskann::get_mean_stats<uint32_t>(stats, query_num,
                                                           [](const diskann::QueryStats &stats) { return stats.n_ios; });
@@ -425,7 +435,12 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         row.beamwidth = optimized_beamwidth;
         row.qps = qps;
         row.mean_latency = mean_latency;
+        row.latency_p50 = latency_p50;
+        row.latency_p90 = latency_p90;
+        row.latency_p95 = latency_p95;
+        row.latency_p99 = latency_p99;
         row.latency_999 = latency_999;
+        row.latency_max = latency_max;
         row.mean_ios = mean_ios;
         row.mean_io_us = mean_io_us;
         row.mean_cpu_us = mean_cpuus;
@@ -490,14 +505,15 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     }
     else
     {
-        csv_stream << "L,beamwidth,qps,mean_latency_us,latency_p999_us,mean_ios,mean_io_us,mean_cpu_us,mean_sort_us,mean_reorder_cpu_us,recall,"
+        csv_stream << "L,beamwidth,qps,mean_latency_us,latency_p50_us,latency_p90_us,latency_p95_us,latency_p99_us,latency_p999_us,latency_max_us,mean_ios,mean_io_us,mean_cpu_us,mean_sort_us,mean_reorder_cpu_us,recall,"
                    << "hop_mean,hop_p50,hop_p90,hop_p95,hop_p99,hop_max,"
                    << "visited_mean,visited_p50,visited_p90,visited_p95,visited_p99,visited_max\n";
         csv_stream << std::fixed << std::setprecision(3);
         for (const auto &row : stats_summary)
         {
             csv_stream << row.L << "," << row.beamwidth << "," << row.qps << "," << row.mean_latency << ","
-                       << row.latency_999 << "," << row.mean_ios << "," << row.mean_io_us << "," << row.mean_cpu_us
+                       << row.latency_p50 << "," << row.latency_p90 << "," << row.latency_p95 << "," << row.latency_p99 << ","
+                       << row.latency_999 << "," << row.latency_max << "," << row.mean_ios << "," << row.mean_io_us << "," << row.mean_cpu_us
                        << "," << row.mean_sort_us << "," << row.mean_reorder_cpu_us << ",";
             if (row.has_recall)
             {
