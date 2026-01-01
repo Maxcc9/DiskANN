@@ -385,3 +385,4 @@ scripts/paramAnalysis/batch_results/
 scripts/paramAnalysis/gridSearch/inputFiles/
 scripts/paramAnalysis/gridSearch/outputFiles/
 *.csv
+*.png
