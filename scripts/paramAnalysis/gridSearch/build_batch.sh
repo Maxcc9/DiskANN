@@ -9,15 +9,16 @@ set -euo pipefail
 usage() {
     cat <<'USAGE'
 用法:
-  bash build_batch.sh [BUILD_CSV] [DATASET] [MAX_PARALLEL]
+  bash build_batch.sh [--build-csv PATH] [--dataset NAME] [--max-parallel N]
 
 參數:
-  BUILD_CSV      預設 ./inputFiles/build_configs.csv（含表頭）
-  DATASET        預設 siftsmall，可覆寫資料路徑
-  MAX_PARALLEL   預設 2（建置較耗時，可酌情提高）
+  --build-csv PATH
+  --dataset NAME
+  --max-parallel N
 
 環境變數可覆寫:
   DATA_FILE, OUTPUT_DIR, DIST_FN, DATA_TYPE
+  EXPERIMENT_TAG 追加到 OUTPUT_DIR 形成每次實驗的獨立資料夾
   BUILD_B, BUILD_M, PQ_DISK_BYTES, BUILD_PQ_BYTES, NUM_THREADS
   APPEND_PARAMS=1 時使用 -A 自動附加參數到檔名前綴
   EXTRA_ARGS 可補充 build_disk_index 的其他參數
@@ -32,18 +33,48 @@ DISKANN_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 APPS_DIR="${DISKANN_ROOT}/build/apps"
 BUILD_BIN="${APPS_DIR}/build_disk_index"
 
-BUILD_CSV="${1:-${SCRIPT_DIR}/inputFiles/build_configs.csv}"
-DATASET="${2:-siftsmall}"
-MAX_PARALLEL="${3:-2}"
+BUILD_CSV="${SCRIPT_DIR}/inputFiles/build_configs.csv"
+DATASET="siftsmall"
+MAX_PARALLEL="1"
+
+# Optional named args
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --build-csv)
+            BUILD_CSV="$2"
+            shift 2
+            ;;
+        --dataset)
+            DATASET="$2"
+            shift 2
+            ;;
+        --max-parallel)
+            MAX_PARALLEL="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "ERROR: 未知參數 $1" >&2
+            exit 1
+            ;;
+        *)
+            echo "ERROR: 不支援位置參數，請使用 --build-csv/--dataset/--max-parallel" >&2
+            exit 1
+            ;;
+    esac
+done
 DRY_RUN="${DRY_RUN:-0}"
 DATA_TYPE="${DATA_TYPE:-float}"
 DIST_FN="${DIST_FN:-l2}"
 
-BUILD_B="${BUILD_B:-0.2}"
-BUILD_M="${BUILD_M:-1}"
+BUILD_B="${BUILD_B:-30}"
+BUILD_M="${BUILD_M:-30}"
 PQ_DISK_BYTES="${PQ_DISK_BYTES:-0}"
 BUILD_PQ_BYTES="${BUILD_PQ_BYTES:-0}"
-NUM_THREADS="${NUM_THREADS:-8}"
+NUM_THREADS="${NUM_THREADS:-16}"
 APPEND_PARAMS="${APPEND_PARAMS:-1}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -61,6 +92,10 @@ if [[ "$APPEND_PARAMS" != "0" && "$APPEND_PARAMS" != "1" ]]; then
 fi
 
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/outputFiles/build}"
+EXPERIMENT_TAG="${EXPERIMENT_TAG:-}"
+if [[ -n "$EXPERIMENT_TAG" ]]; then
+    OUTPUT_DIR="${OUTPUT_DIR}/${EXPERIMENT_TAG}"
+fi
 DATA_FILE="${DATA_FILE:-${DISKANN_ROOT}/data/${DATASET}/${DATASET}_base.bin}"
 mkdir -p "$OUTPUT_DIR"
 
@@ -138,7 +173,6 @@ run_one() {
     echo "✓ Build #${build_id} 完成"
 }
 
-running=0
 fail=0
 declare -A pid_to_sample
 pids=()
@@ -159,10 +193,9 @@ while IFS=',' read -r build_id R L _rest <&3; do
         run_one "$build_id" "$R" "$L" </dev/null 3<&- &
         pid=$!
         pid_to_sample[$pid]="build_${build_id}"
-        running=$((running+1))
         pids+=("$pid")
 
-        if (( running >= MAX_PARALLEL )); then
+        if (( ${#pids[@]} >= MAX_PARALLEL )); then
             oldest_pid="${pids[0]}"
             pids=("${pids[@]:1}")
             if ! wait "$oldest_pid"; then
@@ -170,7 +203,6 @@ while IFS=',' read -r build_id R L _rest <&3; do
                 fail=1
             fi
             unset "pid_to_sample[$oldest_pid]"
-            running=$((running-1))
         fi
     fi
 done
@@ -182,7 +214,6 @@ for pid in "${pids[@]}"; do
         fail=1
     fi
     unset "pid_to_sample[$pid]"
-    running=$((running-1))
 done
 
 echo ""

@@ -9,17 +9,17 @@ set -euo pipefail
 usage() {
     cat <<'USAGE'
 用法:
-  bash search_batch.sh [SEARCH_CSV] [DATASET] [MAX_PARALLEL]
+  bash search_batch.sh [--search-csv PATH] [--dataset NAME] [--max-parallel N]
 
 參數:
-  SEARCH_CSV     預設 ./inputFiles/search_configs.csv（含表頭）
-  DATASET        預設自動從 index 檔名解析；可手動覆寫
-  MAX_PARALLEL   預設 4
+  --search-csv PATH
+  --dataset NAME
+  --max-parallel N
 
 環境變數可覆寫:
   BUILD_DIR, OUTPUT_DIR, DATA_TYPE, DIST_FN
-  QUERY_FILE, GT_FILE, TOPK, SEARCH_IO_LIMIT, THREAD_OVERRIDE
-  APPEND_SEARCH_PARAMS=1 時使用 -A 自動附加搜尋參數到 result_path
+  QUERY_FILE, GT_FILE, SEARCH_IO_LIMIT, THREAD_OVERRIDE
+  EXPERIMENT_TAG 追加到 OUTPUT_DIR，且在 BUILD_DIR 使用預設值時同步追加
   EXTRA_ARGS 可補充 search_disk_index 的其他參數
   ENABLE_IOSTAT=1 時為每筆樣本記錄 iostat
   IOSTAT_INTERVAL=1, IOSTAT_DEVICE, IOSTAT_DATA_PATH
@@ -36,16 +36,44 @@ DISKANN_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 APPS_DIR="${DISKANN_ROOT}/build/apps"
 SEARCH_BIN="${APPS_DIR}/search_disk_index"
 
-SEARCH_CSV="${1:-${SCRIPT_DIR}/inputFiles/search_configs.csv}"
-DATASET="${2:-}"
-MAX_PARALLEL="${3:-4}"
+SEARCH_CSV="${SCRIPT_DIR}/inputFiles/search_configs.csv"
+DATASET=""
+MAX_PARALLEL="4"
+
+# Optional named args
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --search-csv)
+            SEARCH_CSV="$2"
+            shift 2
+            ;;
+        --dataset)
+            DATASET="$2"
+            shift 2
+            ;;
+        --max-parallel)
+            MAX_PARALLEL="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "ERROR: 未知參數 $1" >&2
+            exit 1
+            ;;
+        *)
+            echo "ERROR: 不支援位置參數，請使用 --search-csv/--dataset/--max-parallel" >&2
+            exit 1
+            ;;
+    esac
+done
 DRY_RUN="${DRY_RUN:-0}"
 DATA_TYPE="${DATA_TYPE:-float}"
 DIST_FN="${DIST_FN:-l2}"
-TOPK="${TOPK:-10}"
 SEARCH_IO_LIMIT="${SEARCH_IO_LIMIT:-}"
 THREAD_OVERRIDE="${THREAD_OVERRIDE:-}"
-APPEND_SEARCH_PARAMS="${APPEND_SEARCH_PARAMS:-1}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 ENABLE_IOSTAT="${ENABLE_IOSTAT:-0}"
 IOSTAT_INTERVAL="${IOSTAT_INTERVAL:-1}"
@@ -53,9 +81,23 @@ IOSTAT_DEVICE="${IOSTAT_DEVICE:-}"
 IOSTAT_DATA_PATH="${IOSTAT_DATA_PATH:-}"
 ENABLE_EXPANDED_NODES="${ENABLE_EXPANDED_NODES:-0}"
 EXPANDED_NODES_LIMIT="${EXPANDED_NODES_LIMIT:-0}"
+K_OVERRIDE="${K_OVERRIDE:-}"
 
-BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/outputFiles/build}"
+if [[ -z "${BUILD_DIR+x}" ]]; then
+    BUILD_DIR_DEFAULT=1
+    BUILD_DIR="${SCRIPT_DIR}/outputFiles/build"
+else
+    BUILD_DIR_DEFAULT=0
+    BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/outputFiles/build}"
+fi
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/outputFiles/search}"
+EXPERIMENT_TAG="${EXPERIMENT_TAG:-}"
+if [[ -n "$EXPERIMENT_TAG" ]]; then
+    OUTPUT_DIR="${OUTPUT_DIR}/${EXPERIMENT_TAG}"
+    if [[ "$BUILD_DIR_DEFAULT" -eq 1 ]]; then
+        BUILD_DIR="${BUILD_DIR}/${EXPERIMENT_TAG}"
+    fi
+fi
 
 if [[ ! -f "$SEARCH_CSV" ]]; then
     echo "ERROR: 找不到 SEARCH_CSV: $SEARCH_CSV" >&2
@@ -68,10 +110,6 @@ fi
 if [[ "$ENABLE_IOSTAT" == "1" && "$MAX_PARALLEL" -ne 1 ]]; then
     echo "WARN: ENABLE_IOSTAT=1 建議單一序列執行，已將 MAX_PARALLEL 強制為 1" >&2
     MAX_PARALLEL=1
-fi
-if [[ "$APPEND_SEARCH_PARAMS" != "0" && "$APPEND_SEARCH_PARAMS" != "1" ]]; then
-    echo "ERROR: APPEND_SEARCH_PARAMS 需為 0 或 1" >&2
-    exit 1
 fi
 if [[ ! -d "$BUILD_DIR" ]]; then
     echo "ERROR: 找不到 BUILD_DIR 目錄: $BUILD_DIR" >&2
@@ -156,16 +194,19 @@ run_one() {
     local index_prefix="$1" index_tag="$2" dataset_name="$3"
     local search_id="$4" W="$5" L="$6" K="$7" cache="$8" threads="$9"
     local result_dir="${OUTPUT_DIR}/${index_tag}"
-    local result_prefix="${result_dir}/result_${index_tag}_S${search_id}"
+    local search_tag="${search_id}"
+    if [[ "$search_tag" == S* ]]; then
+        search_tag="${search_tag#S}"
+    fi
     local log_file="${result_dir}/search_${search_id}.log"
-    local stats_csv="${result_prefix}_W${W}_L${L}_cache${cache}_T${threads}_summary_stats.csv"
-    local iostat_log="${stats_csv%_summary_stats.csv}_iostat.log"
-    local expanded_nodes_csv="${stats_csv%_summary_stats.csv}_expanded_nodes.csv"
-    local append_flag=()
     local query_file="${QUERY_FILE:-${DISKANN_ROOT}/data/${dataset_name}/${dataset_name}_query.bin}"
     local gt_file="${GT_FILE:-${DISKANN_ROOT}/data/${dataset_name}/${dataset_name}_groundtruth.bin}"
     local thread_value="${THREAD_OVERRIDE:-${threads}}"
     local K_value="${K_OVERRIDE:-${K}}"
+    local result_prefix="${result_dir}/S${search_tag}_${index_tag}_W${W}_L${L}_K${K_value}_cache${cache}_T${threads}"
+    local stats_csv="${result_prefix}_summary_stats.csv"
+    local iostat_log="${stats_csv%_summary_stats.csv}_iostat.log"
+    local expanded_nodes_csv="${stats_csv%_summary_stats.csv}_expanded_nodes.csv"
 
     mkdir -p "$result_dir"
 
@@ -182,10 +223,6 @@ run_one() {
             echo "ERROR: 找不到 groundtruth 檔案: $gt_file" >&2
             return 1
         fi
-    fi
-
-    if [[ "$APPEND_SEARCH_PARAMS" == "1" ]]; then
-        append_flag=(-A)
     fi
 
     cmd=(
@@ -209,7 +246,6 @@ run_one() {
     if [[ -n "$SEARCH_IO_LIMIT" ]]; then
         cmd+=(--search_io_limit "${SEARCH_IO_LIMIT}")
     fi
-    cmd+=("${append_flag[@]}")
     if [[ -n "$EXTRA_ARGS" ]]; then
         # shellcheck disable=SC2206
         cmd+=($EXTRA_ARGS)
@@ -252,7 +288,6 @@ run_one() {
     echo "✓ ${index_tag} / ${search_id} 完成"
 }
 
-running=0
 fail=0
 declare -A pid_to_job
 pids=()
@@ -263,21 +298,11 @@ for index_file in "${index_files[@]}"; do
     index_tag="$(basename "$index_prefix")"
 
     dataset_name=""
-    build_R=""
-    build_L=""
-    build_B=""
-    build_M=""
 
     if [[ "$index_name" =~ ^([^_]+)_R([0-9]+)_L([0-9]+)_B([0-9.]+)_M([0-9]+)_disk\.index$ ]]; then
         dataset_name="${BASH_REMATCH[1]}"
-        build_R="${BASH_REMATCH[2]}"
-        build_L="${BASH_REMATCH[3]}"
-        build_B="${BASH_REMATCH[4]}"
-        build_M="${BASH_REMATCH[5]}"
     elif [[ "$index_name" =~ ^([^_]+)_R([0-9]+)_L([0-9]+)_disk\.index$ ]]; then
         dataset_name="${BASH_REMATCH[1]}"
-        build_R="${BASH_REMATCH[2]}"
-        build_L="${BASH_REMATCH[3]}"
     fi
 
     if [[ -n "$DATASET" ]]; then
@@ -304,10 +329,9 @@ for index_file in "${index_files[@]}"; do
             run_one "$index_prefix" "$index_tag" "$dataset_name" "$search_id" "$W" "$L" "$K" "$cache" "$threads" </dev/null &
             pid=$!
             pid_to_job[$pid]="${index_tag}_${search_id}"
-            running=$((running+1))
             pids+=("$pid")
 
-            if (( running >= MAX_PARALLEL )); then
+            if (( ${#pids[@]} >= MAX_PARALLEL )); then
                 oldest_pid="${pids[0]}"
                 pids=("${pids[@]:1}")
                 if ! wait "$oldest_pid"; then
@@ -315,7 +339,6 @@ for index_file in "${index_files[@]}"; do
                     fail=1
                 fi
                 unset "pid_to_job[$oldest_pid]"
-                running=$((running-1))
             fi
         fi
     done
@@ -327,7 +350,6 @@ for pid in "${pids[@]}"; do
         fail=1
     fi
     unset "pid_to_job[$pid]"
-    running=$((running-1))
 done
 
 echo ""
