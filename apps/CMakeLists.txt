@@ -19,6 +19,9 @@ target_link_libraries(build_disk_index ${PROJECT_NAME} ${DISKANN_TOOLS_TCMALLOC_
 add_executable(search_disk_index search_disk_index.cpp)
 target_link_libraries(search_disk_index ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} ${DISKANN_TOOLS_TCMALLOC_LINK_OPTIONS} Boost::program_options)
 
+add_executable(dump_disk_neighbors dump_disk_neighbors.cpp)
+target_link_libraries(dump_disk_neighbors ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} ${DISKANN_TOOLS_TCMALLOC_LINK_OPTIONS} Boost::program_options)
+
 add_executable(range_search_disk_index range_search_disk_index.cpp)
 target_link_libraries(range_search_disk_index ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} ${DISKANN_TOOLS_TCMALLOC_LINK_OPTIONS} Boost::program_options)
 
@@ -34,6 +37,7 @@ if (NOT MSVC)
             search_memory_index
             build_disk_index
             search_disk_index
+            dump_disk_neighbors
             range_search_disk_index
             test_streaming_scenario
             test_insert_deletes_consolidate
