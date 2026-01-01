@@ -5,7 +5,8 @@
 - `apps/` CLI binaries (build/search); artifacts under `build/apps/`.
 - `python/src/diskannpy/` PyBind wrapper; tests in `python/tests/`.
 - `tests/` Boost unit tests; datasets under `test_data/`, golden outputs in `test_run/`.
-- `scripts/`, `workflows/` reproducible scenarios (SSD, filtered, dynamic).
+- `scripts/`, `workflows/` reproducible scenarios (SSD, filtered, dynamic, param analysis grid search).
+- `scripts/paramAnalysis/gridSearch/` grid-search tooling for build/search batches and offline analysis.
 - `rust/` Rust crates; follow Cargo workflows.
 
 ## Build, Test, and Development Commands
@@ -21,6 +22,7 @@
 - Python: `black`/`isort` per `pyproject.toml`; add type hints for public APIs.
 - Rust: `cargo fmt` and `cargo clippy`.
 - CLI/tool filenames mirror command names (e.g., `build_disk_index.cpp`).
+- Offline analysis helper: `apps/dump_disk_neighbors.cpp` (dump neighbor lists for node ids).
 
 ## Testing Guidelines
 - Add Boost tests as separate `.cpp` with `BOOST_AUTO_TEST_SUITE`; register in `tests/CMakeLists.txt`.
@@ -28,6 +30,7 @@
 - Python tests `test_*.py` with `unittest` + `numpy.testing`.
 - Rust tests live in each crate; keep `rust/cmd_drivers/` examples current.
 - Update `workflows/*.md` when adding scenarios; stash catalogs in `test_run/`.
+- For param analysis updates, keep `workflows/param_analysis_gridsearch.md` in sync.
 
 ## Commit & Pull Request Guidelines
 - Commit format: `Type: short imperative summary (#issue)` (e.g., `Fix: clamp PQ chunk count (#654)`).
@@ -40,3 +43,9 @@
 
 ## 回應語言
 - 用繁體中文回覆使用者
+
+## AGENTS.md 編寫建議
+- 用簡短標題與條列，保持可掃描性。
+- 只寫專案通用規範與可操作指令，避免一次性細節。
+- 避免敏感資訊（私人路徑、憑證、內網網址）。
+- 內容需與現況同步，新增工具/流程時一併更新。
