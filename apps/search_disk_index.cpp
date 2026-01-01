@@ -16,6 +16,7 @@
 #include "percentile_stats.h"
 #include "search_stats.h"
 #include "program_options_utils.hpp"
+#include "utils.h"
 
 #include <fstream>
 #include <unordered_set>
@@ -60,7 +61,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       const uint32_t num_nodes_to_cache, const uint32_t search_io_limit,
                       const std::vector<uint32_t> &Lvec, const float fail_if_recall_below,
                       const std::vector<std::string> &query_filters, const bool use_reorder_data = false,
-                      const std::string &stats_csv_path = "", const bool append_search_params = false)
+                      const std::string &stats_csv_path = "", const bool append_search_params = false,
+                      const std::string &expanded_nodes_path = "", const uint32_t expanded_nodes_limit = 0,
+                      const bool record_expanded_nodes = false)
 {
     diskann::cout << "Search parameters: #threads: " << num_threads << ", ";
     if (beamwidth <= 0)
@@ -335,6 +338,32 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       << "visited_out_degree_mean,visited_out_degree_max\n";
     }
 
+    bool record_expanded_nodes_enabled = record_expanded_nodes;
+    std::ofstream expanded_nodes_stream;
+    if (record_expanded_nodes_enabled)
+    {
+        if (expanded_nodes_path.empty())
+        {
+            diskann::cout << "WARN: record_expanded_nodes 已啟用，但 expanded_nodes_path 為空，將不記錄"
+                          << std::endl;
+            record_expanded_nodes_enabled = false;
+        }
+    }
+    if (record_expanded_nodes_enabled)
+    {
+        const bool expanded_nodes_file_exists = file_exists(expanded_nodes_path);
+        expanded_nodes_stream.open(expanded_nodes_path, std::ios::out | std::ios::app);
+        if (!expanded_nodes_stream.is_open())
+        {
+            diskann::cerr << "Failed to open expanded nodes csv file: " << expanded_nodes_path << std::endl;
+            record_expanded_nodes_enabled = false;
+        }
+        else if (!expanded_nodes_file_exists)
+        {
+            expanded_nodes_stream << "L,beamwidth,query_id,order,node_id\n";
+        }
+    }
+
     auto compute_recall_matches = [&](uint32_t query_idx, uint32_t test_id) -> uint32_t {
         if (!calc_recall_flag)
             return 0;
@@ -376,6 +405,14 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         query_result_dists[test_id].resize(recall_at * query_num);
 
         auto stats = new diskann::QueryStats[query_num];
+        if (record_expanded_nodes_enabled)
+        {
+            for (uint32_t qi = 0; qi < query_num; qi++)
+            {
+                stats[qi].expanded_nodes_enabled = true;
+                stats[qi].expanded_nodes_limit = expanded_nodes_limit;
+            }
+        }
 
         std::vector<uint64_t> query_result_ids_64(recall_at * query_num);
         auto s = std::chrono::high_resolution_clock::now();
@@ -963,6 +1000,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         double recall_p50 = 0;
         double recall_p75 = 0;
         double recall_p90 = 0;
+        double recall_p95 = 0;
+        double recall_p99 = 0;
         double recall_max = 0;
         if (calc_recall_flag)
         {
@@ -1228,6 +1267,24 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             }
             per_query_csv << oss.str();
         }
+        if (record_expanded_nodes_enabled)
+        {
+            uint64_t dropped_total = 0;
+            for (uint32_t qi = 0; qi < query_num; qi++)
+            {
+                const auto &nodes = stats[qi].expanded_nodes;
+                for (size_t idx = 0; idx < nodes.size(); idx++)
+                {
+                    expanded_nodes_stream << L << "," << optimized_beamwidth << "," << qi << "," << idx << ","
+                                          << nodes[idx] << "\n";
+                }
+                dropped_total += stats[qi].expanded_nodes_dropped;
+            }
+            if (dropped_total > 0)
+            {
+                diskann::cout << "WARN: expanded nodes dropped due to limit: " << dropped_total << std::endl;
+            }
+        }
         delete[] stats;
     }
 
@@ -1340,8 +1397,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 int main(int argc, char **argv)
 {
     std::string data_type, dist_fn, index_path_prefix, result_path_prefix, query_file, gt_file, filter_label,
-        label_type, query_filters_file, stats_csv_path;
-    uint32_t num_threads, K, W, num_nodes_to_cache, search_io_limit;
+        label_type, query_filters_file, stats_csv_path, expanded_nodes_path;
+    uint32_t num_threads, K, W, num_nodes_to_cache, search_io_limit, expanded_nodes_limit;
+    bool record_expanded_nodes = false;
     std::vector<uint32_t> Lvec;
     bool use_reorder_data = false;
     bool append_search_params = false;
@@ -1403,6 +1461,15 @@ int main(int argc, char **argv)
         optional_configs.add_options()(
             "stats_csv_path", po::value<std::string>(&stats_csv_path)->default_value(std::string("")),
             "Path to write per-query stats (CSV) for spreadsheet analysis. Defaults to <result_path>_query_stats.csv");
+        optional_configs.add_options()(
+            "expanded_nodes_path", po::value<std::string>(&expanded_nodes_path)->default_value(std::string("")),
+            "Path to write expanded node list CSV (L,beamwidth,query_id,order,node_id)");
+        optional_configs.add_options()(
+            "expanded_nodes_limit", po::value<uint32_t>(&expanded_nodes_limit)->default_value(0),
+            "Max expanded nodes to record per query (0 = unlimited)");
+        optional_configs.add_options()(
+            "record_expanded_nodes", po::bool_switch(&record_expanded_nodes)->default_value(false),
+            "Enable recording expanded node ids");
         optional_configs.add_options()("append_search_params_to_result_path,A", po::bool_switch(&append_search_params),
                                        "Append _W<beamwidth>_cache<num_nodes_to_cache>_T<num_threads>_L<L> to "
                                        "result_path for outputs");
@@ -1486,17 +1553,20 @@ int main(int argc, char **argv)
                 return search_disk_index<float, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    stats_csv_path, append_search_params);
+                    stats_csv_path, append_search_params, expanded_nodes_path, expanded_nodes_limit,
+                    record_expanded_nodes);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    stats_csv_path, append_search_params);
+                    stats_csv_path, append_search_params, expanded_nodes_path, expanded_nodes_limit,
+                    record_expanded_nodes);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    stats_csv_path, append_search_params);
+                    stats_csv_path, append_search_params, expanded_nodes_path, expanded_nodes_limit,
+                    record_expanded_nodes);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;
@@ -1509,17 +1579,20 @@ int main(int argc, char **argv)
                 return search_disk_index<float>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                 num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                 fail_if_recall_below, query_filters, use_reorder_data, stats_csv_path,
-                                                append_search_params);
+                                                append_search_params, expanded_nodes_path, expanded_nodes_limit,
+                                                record_expanded_nodes);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                  num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                  fail_if_recall_below, query_filters, use_reorder_data, stats_csv_path,
-                                                 append_search_params);
+                                                 append_search_params, expanded_nodes_path, expanded_nodes_limit,
+                                                 record_expanded_nodes);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                   num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                   fail_if_recall_below, query_filters, use_reorder_data, stats_csv_path,
-                                                  append_search_params);
+                                                  append_search_params, expanded_nodes_path, expanded_nodes_limit,
+                                                  record_expanded_nodes);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;

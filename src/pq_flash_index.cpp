@@ -1430,6 +1430,18 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         {
             auto nbr = retset.closest_unexpanded();
             num_seen++;
+            if (stats != nullptr && stats->expanded_nodes_enabled)
+            {
+                if (stats->expanded_nodes_limit == 0 ||
+                    stats->expanded_nodes.size() < static_cast<size_t>(stats->expanded_nodes_limit))
+                {
+                    stats->expanded_nodes.push_back(nbr.id);
+                }
+                else
+                {
+                    stats->expanded_nodes_dropped++;
+                }
+            }
             auto iter = _nhood_cache.find(nbr.id);
             if (iter != _nhood_cache.end())
             {

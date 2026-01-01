@@ -44,6 +44,10 @@ struct QueryStats
     uint64_t visited_out_degree_sum = 0;   // sum of outdegree for expanded nodes
     uint64_t visited_out_degree_count = 0; // number of expanded nodes counted
     uint64_t visited_out_degree_max = 0;   // max outdegree among expanded nodes
+    bool expanded_nodes_enabled = false; // enable recording expanded node ids
+    uint32_t expanded_nodes_limit = 0; // max expanded nodes to record (0 = unlimited)
+    uint32_t expanded_nodes_dropped = 0; // count of dropped expanded nodes due to limit
+    std::vector<uint32_t> expanded_nodes; // expanded node ids for analysis
     unsigned thread_id = 0;     // thread executing the query
     unsigned recall_match_count = 0; // # of matches against ground truth @K
 };
