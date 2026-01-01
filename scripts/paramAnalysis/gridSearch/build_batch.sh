@@ -9,12 +9,12 @@ set -euo pipefail
 usage() {
     cat <<'USAGE'
 用法:
-  bash build_batch.sh [build_csv] [dataset_name] [max_parallel_jobs]
+  bash build_batch.sh [BUILD_CSV] [DATASET] [MAX_PARALLEL]
 
 參數:
-  build_csv           預設 ./inputFiles/build_configs.csv（含表頭）
-  dataset_name        預設 siftsmall，可覆寫資料路徑
-  max_parallel_jobs   預設 2（建置較耗時，可酌情提高）
+  BUILD_CSV      預設 ./inputFiles/build_configs.csv（含表頭）
+  DATASET        預設 siftsmall，可覆寫資料路徑
+  MAX_PARALLEL   預設 2（建置較耗時，可酌情提高）
 
 環境變數可覆寫:
   DATA_FILE, OUTPUT_DIR, DIST_FN, DATA_TYPE
@@ -48,11 +48,11 @@ APPEND_PARAMS="${APPEND_PARAMS:-1}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 if [[ ! -f "$BUILD_CSV" ]]; then
-    echo "ERROR: 找不到 build CSV: $BUILD_CSV" >&2
+    echo "ERROR: 找不到 BUILD_CSV: $BUILD_CSV" >&2
     exit 1
 fi
 if [[ ! "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [[ "$MAX_PARALLEL" -lt 1 ]]; then
-    echo "ERROR: max_parallel_jobs 需為正整數" >&2
+    echo "ERROR: MAX_PARALLEL 需為正整數" >&2
     exit 1
 fi
 if [[ "$APPEND_PARAMS" != "0" && "$APPEND_PARAMS" != "1" ]]; then
