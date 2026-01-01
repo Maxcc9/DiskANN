@@ -69,6 +69,12 @@ struct DiskStatRow
     double out_degree_max = 0;
 
     double mean_latency = 0;
+    double log_mean_latency = 0;
+    double latency_p0 = 0;
+    double latency_p1 = 0;
+    double latency_p5 = 0;
+    double latency_p10 = 0;
+    double latency_p25 = 0;
     double latency_p50 = 0;
     double latency_p75 = 0;
     double latency_p90 = 0;
@@ -78,6 +84,11 @@ struct DiskStatRow
     double latency_max = 0;
 
     double ios_mean = 0;
+    double ios_p0 = 0;
+    double ios_p1 = 0;
+    double ios_p5 = 0;
+    double ios_p10 = 0;
+    double ios_p25 = 0;
     double ios_p50 = 0;
     double ios_p75 = 0;
     double ios_p90 = 0;
@@ -86,6 +97,11 @@ struct DiskStatRow
     double ios_max = 0;
 
     double io_us_mean = 0;
+    double io_us_p0 = 0;
+    double io_us_p1 = 0;
+    double io_us_p5 = 0;
+    double io_us_p10 = 0;
+    double io_us_p25 = 0;
     double io_us_p50 = 0;
     double io_us_p75 = 0;
     double io_us_p90 = 0;
@@ -94,6 +110,11 @@ struct DiskStatRow
     double io_us_max = 0;
 
     double cpu_us_mean = 0;
+    double cpu_us_p0 = 0;
+    double cpu_us_p1 = 0;
+    double cpu_us_p5 = 0;
+    double cpu_us_p10 = 0;
+    double cpu_us_p25 = 0;
     double cpu_us_p50 = 0;
     double cpu_us_p75 = 0;
     double cpu_us_p90 = 0;
@@ -102,6 +123,11 @@ struct DiskStatRow
     double cpu_us_max = 0;
 
     double sort_us_mean = 0;
+    double sort_us_p0 = 0;
+    double sort_us_p1 = 0;
+    double sort_us_p5 = 0;
+    double sort_us_p10 = 0;
+    double sort_us_p25 = 0;
     double sort_us_p50 = 0;
     double sort_us_p75 = 0;
     double sort_us_p90 = 0;
@@ -112,6 +138,11 @@ struct DiskStatRow
     // double reorder_cpu_us_mean = 0;
 
     double read_size_mean = 0;
+    double read_size_p0 = 0;
+    double read_size_p1 = 0;
+    double read_size_p5 = 0;
+    double read_size_p10 = 0;
+    double read_size_p25 = 0;
     double read_size_p50 = 0;
     double read_size_p75 = 0;
     double read_size_p90 = 0;
@@ -119,7 +150,25 @@ struct DiskStatRow
     double read_size_p99 = 0;
     double read_size_max = 0;
 
+    double queue_depth_mean = 0;
+    double queue_depth_p0 = 0;
+    double queue_depth_p1 = 0;
+    double queue_depth_p5 = 0;
+    double queue_depth_p10 = 0;
+    double queue_depth_p25 = 0;
+    double queue_depth_p50 = 0;
+    double queue_depth_p75 = 0;
+    double queue_depth_p90 = 0;
+    double queue_depth_p95 = 0;
+    double queue_depth_p99 = 0;
+    double queue_depth_max = 0;
+
     double compares_mean = 0;
+    double compares_p0 = 0;
+    double compares_p1 = 0;
+    double compares_p5 = 0;
+    double compares_p10 = 0;
+    double compares_p25 = 0;
     double compares_p50 = 0;
     double compares_p75 = 0;
     double compares_p90 = 0;
@@ -136,6 +185,8 @@ struct DiskStatRow
     double recall_p50 = 0;
     double recall_p75 = 0;
     double recall_p90 = 0;
+    double recall_p95 = 0;
+    double recall_p99 = 0;
     double recall_max = 0;
     
     double cache_hit_rate_mean = 0;
@@ -147,9 +198,16 @@ struct DiskStatRow
     double cache_hit_rate_p50 = 0;
     double cache_hit_rate_p75 = 0;
     double cache_hit_rate_p90 = 0;
+    double cache_hit_rate_p95 = 0;
+    double cache_hit_rate_p99 = 0;
     double cache_hit_rate_max = 0;
 
     double hop_mean = 0;
+    double hop_p0 = 0;
+    double hop_p1 = 0;
+    double hop_p5 = 0;
+    double hop_p10 = 0;
+    double hop_p25 = 0;
     double hop_p50 = 0;
     double hop_p75 = 0;
     double hop_p90 = 0;
@@ -158,11 +216,29 @@ struct DiskStatRow
     uint64_t hop_max = 0;
 
     double visited_mean = 0;
+    double visited_p0 = 0;
+    double visited_p1 = 0;
+    double visited_p5 = 0;
+    double visited_p10 = 0;
+    double visited_p25 = 0;
     double visited_p50 = 0;
     double visited_p75 = 0;
     double visited_p90 = 0;
     double visited_p95 = 0;
     double visited_p99 = 0;
     uint64_t visited_max = 0;
+
+    double thread_util_mean = 0;
+    double thread_util_p0 = 0;
+    double thread_util_p1 = 0;
+    double thread_util_p5 = 0;
+    double thread_util_p10 = 0;
+    double thread_util_p25 = 0;
+    double thread_util_p50 = 0;
+    double thread_util_p75 = 0;
+    double thread_util_p90 = 0;
+    double thread_util_p95 = 0;
+    double thread_util_p99 = 0;
+    double thread_util_max = 0;
 };
 } // namespace diskann

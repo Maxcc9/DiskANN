@@ -1486,6 +1486,15 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             if (stats != nullptr)
             {
                 stats->n_ios += to_read;  // Only count what was actually read
+                if (to_read > 0)
+                {
+                    stats->queue_depth_sum += static_cast<uint64_t>(to_read);
+                    stats->queue_depth_count += 1;
+                    if (stats->queue_depth_max < to_read)
+                    {
+                        stats->queue_depth_max = to_read;
+                    }
+                }
             }
             io_timer.reset();
 #ifdef USE_BING_INFRA
@@ -1522,6 +1531,15 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 
             uint64_t nnbrs = cached_nhood.second.first;
             uint32_t *node_nbrs = cached_nhood.second.second;
+            if (stats != nullptr)
+            {
+                stats->visited_out_degree_sum += nnbrs;
+                stats->visited_out_degree_count += 1;
+                if (stats->visited_out_degree_max < nnbrs)
+                {
+                    stats->visited_out_degree_max = nnbrs;
+                }
+            }
 
             // compute node_nbrs <-> query dists in PQ space
             cpu_timer.reset();
@@ -1584,6 +1602,15 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     cur_expanded_dist = _disk_pq_table.l2_distance(query_float, (uint8_t *)data_buf);
             }
             full_retset.push_back(Neighbor(frontier_nhood.first, cur_expanded_dist));
+            if (stats != nullptr)
+            {
+                stats->visited_out_degree_sum += nnbrs;
+                stats->visited_out_degree_count += 1;
+                if (stats->visited_out_degree_max < nnbrs)
+                {
+                    stats->visited_out_degree_max = nnbrs;
+                }
+            }
             uint32_t *node_nbrs = (node_buf + 1);
             // compute node_nbrs <-> query dist in PQ space
             cpu_timer.reset();

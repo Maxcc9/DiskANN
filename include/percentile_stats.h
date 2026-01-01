@@ -38,6 +38,12 @@ struct QueryStats
     uint64_t n_cache_hits = 0; // # cache_hits (快取命中次數)
     uint64_t n_hops = 0;       // # search hops
     uint64_t visited_nodes = 0; // # unique visited nodes in search
+    uint64_t queue_depth_sum = 0;   // sum of IO batch sizes across iterations
+    uint64_t queue_depth_count = 0; // number of IO batches issued
+    uint64_t queue_depth_max = 0;   // max IO batch size in a query
+    uint64_t visited_out_degree_sum = 0;   // sum of outdegree for expanded nodes
+    uint64_t visited_out_degree_count = 0; // number of expanded nodes counted
+    uint64_t visited_out_degree_max = 0;   // max outdegree among expanded nodes
     unsigned thread_id = 0;     // thread executing the query
     unsigned recall_match_count = 0; // # of matches against ground truth @K
 };
