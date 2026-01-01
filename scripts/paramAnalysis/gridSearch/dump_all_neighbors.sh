@@ -13,6 +13,7 @@ usage() {
 
 環境變數可覆寫:
   BUILD_DIR           預設 ./outputFiles/build
+  EXPERIMENT_TAG      追加到預設 SEARCH_DIR/BUILD_DIR
   DATA_TYPE           預設 float
   DIST_FN             預設 l2
   MAX_NODES           預設 0 (0 = all)
@@ -29,7 +30,20 @@ APPS_DIR="${DISKANN_ROOT}/build/apps"
 DUMP_BIN="${APPS_DIR}/dump_disk_neighbors"
 
 SEARCH_DIR="${1:-${SCRIPT_DIR}/outputFiles/search}"
-BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/outputFiles/build}"
+if [[ -z "${BUILD_DIR+x}" ]]; then
+    BUILD_DIR_DEFAULT=1
+    BUILD_DIR="${SCRIPT_DIR}/outputFiles/build"
+else
+    BUILD_DIR_DEFAULT=0
+    BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/outputFiles/build}"
+fi
+EXPERIMENT_TAG="${EXPERIMENT_TAG:-}"
+if [[ -z "${1:-}" && -n "$EXPERIMENT_TAG" ]]; then
+    SEARCH_DIR="${SEARCH_DIR}/${EXPERIMENT_TAG}"
+fi
+if [[ -n "$EXPERIMENT_TAG" && "$BUILD_DIR_DEFAULT" -eq 1 ]]; then
+    BUILD_DIR="${BUILD_DIR}/${EXPERIMENT_TAG}"
+fi
 DATA_TYPE="${DATA_TYPE:-float}"
 DIST_FN="${DIST_FN:-l2}"
 MAX_NODES="${MAX_NODES:-0}"
