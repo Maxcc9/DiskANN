@@ -7,6 +7,13 @@
 - `tests/` Boost unit tests; datasets under `test_data/`, golden outputs in `test_run/`.
 - `scripts/`, `workflows/` reproducible scenarios (SSD, filtered, dynamic, param analysis grid search).
 - `scripts/paramAnalysis/gridSearch/` grid-search tooling for build/search batches and offline analysis.
+- Output naming: search artifacts use prefix `S{search_id}_{index_tag}_W{W}_L{L}_K{K}_cache{cache}_T{threads}`.
+- Top-K analysis outputs: `*_topk{K}_nodes.txt`, `*_topk{K}_neighbors.csv`.
+- Aggregation outputs: `outputFiles/analyze/collected_stats_{search_dir}_{timestamp}.csv` and `outputFiles/analyze/collected_topk_{search_dir}_{timestamp}.csv`.
+- Analysis reports: `outputFiles/analyze/<REPORT_PREFIX>/figures/`, `outputFiles/analyze/<REPORT_PREFIX>/tables/`, `outputFiles/analyze/<REPORT_PREFIX>/summary.md`.
+- Notebook helper: `scripts/paramAnalysis/gridSearch/analysis.ipynb`.
+- Batch tooling supports `EXPERIMENT_TAG` to create per-run subfolders under `outputFiles/build` and `outputFiles/search`.
+- `build_batch.sh` and `search_batch.sh` require named args (`--build-csv`, `--search-csv`, `--dataset`, `--max-parallel`).
 - `rust/` Rust crates; follow Cargo workflows.
 
 ## Build, Test, and Development Commands
