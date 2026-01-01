@@ -9,18 +9,22 @@ set -euo pipefail
 usage() {
     cat <<'USAGE'
 用法:
-  bash search_batch.sh [search_csv] [dataset_name] [max_parallel_jobs]
+  bash search_batch.sh [SEARCH_CSV] [DATASET] [MAX_PARALLEL]
 
 參數:
-  search_csv          預設 ./inputFiles/search_configs.csv（含表頭）
-  dataset_name        預設自動從 index 檔名解析；可手動覆寫
-  max_parallel_jobs   預設 4
+  SEARCH_CSV     預設 ./inputFiles/search_configs.csv（含表頭）
+  DATASET        預設自動從 index 檔名解析；可手動覆寫
+  MAX_PARALLEL   預設 4
 
 環境變數可覆寫:
   BUILD_DIR, OUTPUT_DIR, DATA_TYPE, DIST_FN
   QUERY_FILE, GT_FILE, TOPK, SEARCH_IO_LIMIT, THREAD_OVERRIDE
   APPEND_SEARCH_PARAMS=1 時使用 -A 自動附加搜尋參數到 result_path
   EXTRA_ARGS 可補充 search_disk_index 的其他參數
+  ENABLE_IOSTAT=1 時為每筆樣本記錄 iostat
+  IOSTAT_INTERVAL=1, IOSTAT_DEVICE, IOSTAT_DATA_PATH
+  ENABLE_EXPANDED_NODES=1 時為每筆樣本輸出 expanded_nodes CSV
+  EXPANDED_NODES_LIMIT=0 (0 = unlimited)
   DRY_RUN=1 時僅印出指令不執行 search_disk_index
 USAGE
 }
@@ -43,24 +47,34 @@ SEARCH_IO_LIMIT="${SEARCH_IO_LIMIT:-}"
 THREAD_OVERRIDE="${THREAD_OVERRIDE:-}"
 APPEND_SEARCH_PARAMS="${APPEND_SEARCH_PARAMS:-1}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+ENABLE_IOSTAT="${ENABLE_IOSTAT:-0}"
+IOSTAT_INTERVAL="${IOSTAT_INTERVAL:-1}"
+IOSTAT_DEVICE="${IOSTAT_DEVICE:-}"
+IOSTAT_DATA_PATH="${IOSTAT_DATA_PATH:-}"
+ENABLE_EXPANDED_NODES="${ENABLE_EXPANDED_NODES:-0}"
+EXPANDED_NODES_LIMIT="${EXPANDED_NODES_LIMIT:-0}"
 
 BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/outputFiles/build}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/outputFiles/search}"
 
 if [[ ! -f "$SEARCH_CSV" ]]; then
-    echo "ERROR: 找不到 search CSV: $SEARCH_CSV" >&2
+    echo "ERROR: 找不到 SEARCH_CSV: $SEARCH_CSV" >&2
     exit 1
 fi
 if [[ ! "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [[ "$MAX_PARALLEL" -lt 1 ]]; then
-    echo "ERROR: max_parallel_jobs 需為正整數" >&2
+    echo "ERROR: MAX_PARALLEL 需為正整數" >&2
     exit 1
+fi
+if [[ "$ENABLE_IOSTAT" == "1" && "$MAX_PARALLEL" -ne 1 ]]; then
+    echo "WARN: ENABLE_IOSTAT=1 建議單一序列執行，已將 MAX_PARALLEL 強制為 1" >&2
+    MAX_PARALLEL=1
 fi
 if [[ "$APPEND_SEARCH_PARAMS" != "0" && "$APPEND_SEARCH_PARAMS" != "1" ]]; then
     echo "ERROR: APPEND_SEARCH_PARAMS 需為 0 或 1" >&2
     exit 1
 fi
 if [[ ! -d "$BUILD_DIR" ]]; then
-    echo "ERROR: 找不到 build 目錄: $BUILD_DIR" >&2
+    echo "ERROR: 找不到 BUILD_DIR 目錄: $BUILD_DIR" >&2
     exit 1
 fi
 
@@ -79,6 +93,23 @@ else
 fi
 
 strip_ws() { echo "$1" | tr -d '[:space:]'; }
+
+resolve_iostat_device() {
+    local path_hint="$1"
+    if [[ -n "$IOSTAT_DEVICE" ]]; then
+        echo "$IOSTAT_DEVICE"
+        return 0
+    fi
+    if [[ -n "$IOSTAT_DATA_PATH" && -e "$IOSTAT_DATA_PATH" ]]; then
+        df -P "$IOSTAT_DATA_PATH" | awk 'NR==2 {print $1}'
+        return 0
+    fi
+    if [[ -n "$path_hint" && -e "$path_hint" ]]; then
+        df -P "$path_hint" | awk 'NR==2 {print $1}'
+        return 0
+    fi
+    echo ""
+}
 
 search_ids=()
 search_ws=()
@@ -127,6 +158,9 @@ run_one() {
     local result_dir="${OUTPUT_DIR}/${index_tag}"
     local result_prefix="${result_dir}/result_${index_tag}_S${search_id}"
     local log_file="${result_dir}/search_${search_id}.log"
+    local stats_csv="${result_prefix}_W${W}_L${L}_cache${cache}_T${threads}_summary_stats.csv"
+    local iostat_log="${stats_csv%_summary_stats.csv}_iostat.log"
+    local expanded_nodes_csv="${stats_csv%_summary_stats.csv}_expanded_nodes.csv"
     local append_flag=()
     local query_file="${QUERY_FILE:-${DISKANN_ROOT}/data/${dataset_name}/${dataset_name}_query.bin}"
     local gt_file="${GT_FILE:-${DISKANN_ROOT}/data/${dataset_name}/${dataset_name}_groundtruth.bin}"
@@ -162,12 +196,16 @@ run_one() {
         --query_file "${query_file}"
         --gt_file "${gt_file}"
         --result_path "${result_prefix}"
+        --stats_csv_path "${stats_csv}"
         --num_nodes_to_cache "${cache}"
         --num_threads "${thread_value}"
         -K "${K_value}"
         -L "${L}"
         -W "${W}"
     )
+    if [[ "$ENABLE_EXPANDED_NODES" == "1" ]]; then
+        cmd+=(--record_expanded_nodes --expanded_nodes_path "${expanded_nodes_csv}" --expanded_nodes_limit "${EXPANDED_NODES_LIMIT}")
+    fi
     if [[ -n "$SEARCH_IO_LIMIT" ]]; then
         cmd+=(--search_io_limit "${SEARCH_IO_LIMIT}")
     fi
@@ -186,9 +224,30 @@ run_one() {
         return 0
     fi
 
+    if [[ "$ENABLE_IOSTAT" == "1" ]]; then
+        if ! command -v iostat >/dev/null 2>&1; then
+            echo "WARN: ENABLE_IOSTAT=1 但找不到 iostat，略過記錄" >&2
+        else
+            local device
+            device="$(resolve_iostat_device "${index_prefix}_disk.index")"
+            if [[ -n "$device" ]]; then
+                iostat -x "$IOSTAT_INTERVAL" "$device" > "$iostat_log" &
+            else
+                iostat -x "$IOSTAT_INTERVAL" > "$iostat_log" &
+            fi
+            iostat_pid=$!
+        fi
+    fi
+
     if ! "${cmd[@]}" > "${log_file}" 2>&1 < /dev/null; then
+        if [[ -n "${iostat_pid:-}" ]]; then
+            kill "$iostat_pid" >/dev/null 2>&1 || true
+        fi
         echo "✗ ${index_tag} / ${search_id} 失敗，請檢查 ${log_file}"
         return 1
+    fi
+    if [[ -n "${iostat_pid:-}" ]]; then
+        kill "$iostat_pid" >/dev/null 2>&1 || true
     fi
     echo "✓ ${index_tag} / ${search_id} 完成"
 }
