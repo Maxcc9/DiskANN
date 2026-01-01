@@ -304,15 +304,35 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     auto base_output_prefix = [&](uint32_t bw_value) {
         std::ostringstream oss;
         oss << result_dir << "/";
-        if (!user_prefix.empty())
-            oss << user_prefix << "_";
-        oss << index_basename << build_param_suffix(bw_value);
+        const bool prefix_has_index =
+            !user_prefix.empty() && (user_prefix.find(index_basename) != std::string::npos);
+        if (user_prefix.empty())
+        {
+            oss << index_basename << build_param_suffix(bw_value);
+        }
+        else if (prefix_has_index)
+        {
+            oss << user_prefix << build_param_suffix(bw_value);
+        }
+        else
+        {
+            oss << user_prefix << "_" << index_basename << build_param_suffix(bw_value);
+        }
         return oss.str();
     };
 
     auto make_result_prefix_for_l = [&](uint32_t l_value, uint32_t bw_value) {
         std::ostringstream oss;
-        oss << base_output_prefix(bw_value) << "_L" << l_value;
+        const std::string l_tag = "_L" + std::to_string(l_value);
+        const bool prefix_has_l = !user_prefix.empty() && (user_prefix.find(l_tag) != std::string::npos);
+        if (prefix_has_l)
+        {
+            oss << base_output_prefix(bw_value);
+        }
+        else
+        {
+            oss << base_output_prefix(bw_value) << l_tag;
+        }
         return oss.str();
     };
 
