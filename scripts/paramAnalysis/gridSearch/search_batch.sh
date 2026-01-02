@@ -25,6 +25,7 @@ usage() {
   IOSTAT_INTERVAL=1, IOSTAT_DEVICE, IOSTAT_DATA_PATH
   ENABLE_EXPANDED_NODES=1 時為每筆樣本輸出 expanded_nodes CSV
   EXPANDED_NODES_LIMIT=0 (0 = unlimited)
+  SLEEP_SECONDS=0 每筆搜尋結束後 sleep 秒數（可用於降載）
   DRY_RUN=1 時僅印出指令不執行 search_disk_index
 USAGE
 }
@@ -82,6 +83,7 @@ IOSTAT_DATA_PATH="${IOSTAT_DATA_PATH:-}"
 ENABLE_EXPANDED_NODES="${ENABLE_EXPANDED_NODES:-0}"
 EXPANDED_NODES_LIMIT="${EXPANDED_NODES_LIMIT:-0}"
 K_OVERRIDE="${K_OVERRIDE:-}"
+SLEEP_SECONDS="${SLEEP_SECONDS:-0}"
 
 if [[ -z "${BUILD_DIR+x}" ]]; then
     BUILD_DIR_DEFAULT=1
@@ -286,6 +288,9 @@ run_one() {
         kill "$iostat_pid" >/dev/null 2>&1 || true
     fi
     echo "✓ ${index_tag} / ${search_id} 完成"
+    if [[ "$SLEEP_SECONDS" =~ ^[0-9]+$ ]] && [[ "$SLEEP_SECONDS" -gt 0 ]]; then
+        sleep "$SLEEP_SECONDS"
+    fi
 }
 
 fail=0
