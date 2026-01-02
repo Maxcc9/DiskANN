@@ -64,7 +64,9 @@ def main() -> int:
     analysis_dir = Path(__file__).resolve().parent
     analyze_dir = (analysis_dir / "../outputFiles/analyze").resolve()
     report_prefix = Path(os.environ.get("REPORT_PREFIX", "analysis_reports"))
+    collect_prefix = Path(os.environ.get("COLLECT_PREFIX", str(report_prefix)))
     report_dir = (analyze_dir / report_prefix).resolve()
+    collect_dir = (analyze_dir / collect_prefix).resolve()
 
     notebooks = [
         "00_load_and_qc.ipynb",
@@ -84,7 +86,7 @@ def main() -> int:
         print(f"Running: {path}")
         run_notebook(path)
 
-    write_summary(report_dir, analyze_dir)
+    write_summary(report_dir, collect_dir)
     print(f"Summary: {report_dir / 'summary.md'}")
     return 0
 

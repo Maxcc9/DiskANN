@@ -130,7 +130,7 @@ python collect.py
 Optional output:
 
 ```bash
-python collect.py -o ./outputFiles/analyze/collected_stats.csv
+python collect.py -o ./outputFiles/analyze/exp01/collected_stats.csv
 ```
 
 Per-experiment input folder:
@@ -140,8 +140,8 @@ EXPERIMENT_TAG=exp01 python collect.py
 ```
 
 Outputs:
-- `scripts/paramAnalysis/gridSearch/outputFiles/analyze/collected_stats_{search_dir}_{timestamp}.csv`
-- `scripts/paramAnalysis/gridSearch/outputFiles/analyze/collected_topk_{search_dir}_{timestamp}.csv`
+- `scripts/paramAnalysis/gridSearch/outputFiles/analyze/{search_dir}/collected_stats_{search_dir}_{timestamp}.csv`
+- `scripts/paramAnalysis/gridSearch/outputFiles/analyze/{search_dir}/collected_topk_{search_dir}_{timestamp}.csv`
 
 ## 6) Dump Neighbor Lists (Offline Analysis)
 

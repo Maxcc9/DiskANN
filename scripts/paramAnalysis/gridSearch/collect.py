@@ -7,7 +7,7 @@
   python collect.py [output_file]
 
 參數：
-  output_file  彙總結果輸出檔案，預設 ./outputFiles/analyze/collected_stats_{timestamp}.csv
+  output_file  彙總結果輸出檔案，預設 ./outputFiles/analyze/{search_tag}/collected_stats_{timestamp}.csv
 """
 
 import os
@@ -324,7 +324,7 @@ def main():
     parser.add_argument(
         "-o", "--output",
         default=None,
-        help="彙總結果輸出檔案 (預設: ./outputFiles/analyze/collected_stats_{timestamp}.csv)"
+        help="彙總結果輸出檔案 (預設: ./outputFiles/analyze/{search_tag}/collected_stats_{timestamp}.csv)"
     )
     parser.add_argument(
         "-d", "--search-dir",
@@ -339,7 +339,7 @@ def main():
     parser.add_argument(
         "--topk-output",
         default=None,
-        help="Top-K 彙總結果輸出檔案 (預設: ./outputFiles/analyze/collected_topk_{timestamp}.csv)"
+        help="Top-K 彙總結果輸出檔案 (預設: ./outputFiles/analyze/{search_tag}/collected_topk_{timestamp}.csv)"
     )
     
     args = parser.parse_args()
@@ -356,13 +356,13 @@ def main():
     search_tag = Path(search_dir).name
     if args.output is None:
         output_file = os.path.abspath(
-            f"./outputFiles/analyze/collected_stats_{search_tag}_{timestamp}.csv"
+            f"./outputFiles/analyze/{search_tag}/collected_stats_{search_tag}_{timestamp}.csv"
         )
     else:
         output_file = os.path.abspath(args.output)
     if args.topk_output is None:
         topk_output = os.path.abspath(
-            f"./outputFiles/analyze/collected_topk_{search_tag}_{timestamp}.csv"
+            f"./outputFiles/analyze/{search_tag}/collected_topk_{search_tag}_{timestamp}.csv"
         )
     else:
         topk_output = os.path.abspath(args.topk_output)

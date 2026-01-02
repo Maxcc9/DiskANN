@@ -92,8 +92,8 @@ EXPERIMENT_TAG=exp01 python collect.py
 ```
 
 輸出：
-- `outputFiles/analyze/collected_stats_search_exp01_<timestamp>.csv`
-- `outputFiles/analyze/collected_topk_search_exp01_<timestamp>.csv`
+- `outputFiles/analyze/exp01/collected_stats_exp01_<timestamp>.csv`
+- `outputFiles/analyze/exp01/collected_topk_exp01_<timestamp>.csv`
 
 ## 7) 執行分析（00~06 notebooks）
 
@@ -101,13 +101,13 @@ EXPERIMENT_TAG=exp01 python collect.py
 
 ```bash
 cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch/analysis
-REPORT_PREFIX=exp01_reports ./run_all_notebooks.py
+REPORT_PREFIX=exp01 ./run_all_notebooks.py
 ```
 
 輸出：
-- `outputFiles/analyze/exp01_reports/figures/`
-- `outputFiles/analyze/exp01_reports/tables/`
-- `outputFiles/analyze/exp01_reports/summary.md`
+- `outputFiles/analyze/exp01/figures/`
+- `outputFiles/analyze/exp01/tables/`
+- `outputFiles/analyze/exp01/summary.md`
 
 ## 8) 常用變數整理
 
@@ -124,5 +124,5 @@ EXPERIMENT_TAG=exp02 bash build_batch.sh --build-csv ./inputFiles/build_configs.
 EXPERIMENT_TAG=exp02 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv
 EXPERIMENT_TAG=exp02 python collect.py
 cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch/analysis
-REPORT_PREFIX=exp02_reports ./run_all_notebooks.py
+REPORT_PREFIX=exp02 ./run_all_notebooks.py
 ```
