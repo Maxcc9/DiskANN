@@ -39,6 +39,24 @@ int main(int argc, char **argv)
 
     int datasize = sizeof(float);
 
+    if (!file_exists(argv[2]))
+    {
+        std::cerr << "Error: input file not found: " << argv[2] << std::endl;
+        return -1;
+    }
+
+    const std::string output_path(argv[3]);
+    auto last_slash = output_path.find_last_of("/\\");
+    if (last_slash != std::string::npos)
+    {
+        auto parent_dir = output_path.substr(0, last_slash);
+        if (!parent_dir.empty() && !file_exists(parent_dir, true))
+        {
+            std::cerr << "Error: output directory does not exist: " << parent_dir << std::endl;
+            return -1;
+        }
+    }
+
     if (strcmp(argv[1], "uint8") == 0 || strcmp(argv[1], "int8") == 0)
     {
         datasize = sizeof(uint8_t);
@@ -50,6 +68,11 @@ int main(int argc, char **argv)
     }
 
     std::ifstream reader(argv[2], std::ios::binary | std::ios::ate);
+    if (!reader.is_open())
+    {
+        std::cerr << "Error: failed to open input file: " << argv[2] << std::endl;
+        return -1;
+    }
     size_t fsize = reader.tellg();
     reader.seekg(0, std::ios::beg);
 
@@ -64,6 +87,11 @@ int main(int argc, char **argv)
     size_t nblks = ROUND_UP(npts, blk_size) / blk_size;
     std::cout << "# blks: " << nblks << std::endl;
     std::ofstream writer(argv[3], std::ios::binary);
+    if (!writer.is_open())
+    {
+        std::cerr << "Error: failed to open output file: " << argv[3] << std::endl;
+        return -1;
+    }
     int32_t npts_s32 = (int32_t)npts;
     int32_t ndims_s32 = (int32_t)ndims;
     writer.write((char *)&npts_s32, sizeof(int32_t));
