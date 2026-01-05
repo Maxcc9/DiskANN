@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import csv
+import os
 
 # === Build parameter candidates ===
 BUILD_R_LIST = [16, 32, 64, 128]
@@ -34,6 +35,9 @@ def main():
                 "build_L": L
             })
             build_id += 1
+
+    # Auto-create directory if not exists
+    os.makedirs("./inputFiles", exist_ok=True)
 
     with open("./inputFiles/build_configs.csv", "w", newline="") as f:
         writer = csv.DictWriter(
