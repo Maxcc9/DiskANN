@@ -26,6 +26,10 @@ usage() {
   ENABLE_EXPANDED_NODES=1 時為每筆樣本輸出 expanded_nodes CSV
   EXPANDED_NODES_LIMIT=0 (0 = unlimited)
   SLEEP_SECONDS=0 每筆搜尋結束後 sleep 秒數（可用於降載）
+  COOLDOWN_TEMP_C=60 設定後：每筆搜尋開始前確認 NVMe 溫度低於此值，並強制改為單工
+  COOLDOWN_CHECK_INTERVAL=15 檢查間隔秒數
+  TEMP_DEVICE=/dev/nvme0 供溫度檢查使用
+  NVME_USE_SUDO=0 設為 1 時以 sudo 讀取 nvme smart-log（若無法直接讀取）
   DRY_RUN=1 時僅印出指令不執行 search_disk_index
 USAGE
 }
@@ -84,6 +88,11 @@ ENABLE_EXPANDED_NODES="${ENABLE_EXPANDED_NODES:-0}"
 EXPANDED_NODES_LIMIT="${EXPANDED_NODES_LIMIT:-0}"
 K_OVERRIDE="${K_OVERRIDE:-}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-0}"
+COOLDOWN_TEMP_C="${COOLDOWN_TEMP_C:-}"
+COOLDOWN_CHECK_INTERVAL="${COOLDOWN_CHECK_INTERVAL:-15}"
+TEMP_DEVICE="${TEMP_DEVICE:-/dev/nvme0}"
+NVME_USE_SUDO="${NVME_USE_SUDO:-0}"
+COOLDOWN_ENABLED=0
 
 if [[ -z "${BUILD_DIR+x}" ]]; then
     BUILD_DIR_DEFAULT=1
@@ -109,8 +118,20 @@ if [[ ! "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [[ "$MAX_PARALLEL" -lt 1 ]]; then
     echo "ERROR: MAX_PARALLEL 需為正整數" >&2
     exit 1
 fi
+if [[ -n "$COOLDOWN_TEMP_C" ]]; then
+    if [[ "$COOLDOWN_TEMP_C" =~ ^[0-9]+$ ]]; then
+        COOLDOWN_ENABLED=1
+    else
+        echo "WARN: COOLDOWN_TEMP_C=$COOLDOWN_TEMP_C 不是整數，忽略降溫控制" >&2
+        COOLDOWN_TEMP_C=""
+    fi
+fi
 if [[ "$ENABLE_IOSTAT" == "1" && "$MAX_PARALLEL" -ne 1 ]]; then
     echo "WARN: ENABLE_IOSTAT=1 建議單一序列執行，已將 MAX_PARALLEL 強制為 1" >&2
+    MAX_PARALLEL=1
+fi
+if [[ "$COOLDOWN_ENABLED" == "1" && "$MAX_PARALLEL" -ne 1 ]]; then
+    echo "WARN: 啟用 COOLDOWN_TEMP_C 時改為單工，已將 MAX_PARALLEL 強制為 1" >&2
     MAX_PARALLEL=1
 fi
 if [[ ! -d "$BUILD_DIR" ]]; then
@@ -149,6 +170,94 @@ resolve_iostat_device() {
         return 0
     fi
     echo ""
+}
+
+get_nvme_temperature_c() {
+    local dev="$1"
+    if [[ -z "$dev" || ! -e "$dev" ]]; then
+        echo ""
+        return 0
+    fi
+
+    local nvme_cmd=(nvme)
+    if [[ "$NVME_USE_SUDO" == "1" ]]; then
+        nvme_cmd=(sudo -n nvme)
+    fi
+
+    if command -v "${nvme_cmd[-1]}" >/dev/null 2>&1; then
+        local temp
+        local output
+        if output=$("${nvme_cmd[@]}" smart-log "$dev" 2>/dev/null); then
+            temp=$(echo "$output" | awk '
+                /^temperature/ {comp=$3}
+                /^Temperature Sensor/ {
+                    if ($5 ~ /^[0-9]+$/) {
+                        if ($5 > max) max=$5
+                    }
+                }
+                END {
+                    if (max == "" && comp != "") max=comp
+                    if (max != "") print max
+                }')
+            if [[ -n "$temp" ]]; then
+                echo "$temp"
+                return 0
+            else
+                echo "WARN: nvme smart-log 無法解析溫度（輸出為空），改用 hwmon 後備" >&2
+            fi
+        else
+            echo "WARN: nvme smart-log 執行失敗，狀態碼 $?，改用 hwmon 後備" >&2
+        fi
+    fi
+
+    # Fallback to sysfs hwmon (millidegree)
+    local block_name
+    block_name="$(basename "$dev")"
+    local hwmon_files=("/sys/block/${block_name}/device/hwmon/"*/temp*_input)
+    for f in "${hwmon_files[@]}"; do
+        if [[ -f "$f" ]]; then
+            local milli
+            milli=$(cat "$f" 2>/dev/null)
+            if [[ "$milli" =~ ^[0-9]+$ ]]; then
+                echo $((milli / 1000))
+                return 0
+            fi
+        fi
+    done
+
+    echo ""
+}
+
+block_until_cool() {
+    local threshold="$1"
+    local interval="$2"
+    local dev="$3"
+
+    if [[ "$COOLDOWN_ENABLED" -ne 1 ]]; then
+        return 0
+    fi
+
+    while true; do
+        local temp
+        temp="$(get_nvme_temperature_c "$dev")"
+
+        if [[ -z "$temp" ]]; then
+            echo "WARN: 無法讀取 $dev 溫度，停止降溫等待" >&2
+            return 0
+        fi
+        if ! [[ "$temp" =~ ^[0-9]+$ ]]; then
+            echo "WARN: 讀到的溫度值非數字（$temp），停止降溫等待" >&2
+            return 0
+        fi
+
+        if [[ "$temp" -lt "$threshold" ]]; then
+            echo "INFO: $dev 溫度 ${temp}°C < ${threshold}°C，可開始下一筆搜尋" >&2
+            return 0
+        fi
+
+        echo "INFO: $dev 溫度 ${temp}°C >= ${threshold}°C，等待 ${interval}s 後重試" >&2
+        sleep "$interval"
+    done
 }
 
 search_ids=()
@@ -261,6 +370,8 @@ run_one() {
         echo "✓ ${index_tag} / ${search_id} 完成 (dry-run)"
         return 0
     fi
+
+    block_until_cool "$COOLDOWN_TEMP_C" "$COOLDOWN_CHECK_INTERVAL" "$TEMP_DEVICE"
 
     if [[ "$ENABLE_IOSTAT" == "1" ]]; then
         if ! command -v iostat >/dev/null 2>&1; then
