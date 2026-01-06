@@ -3,6 +3,13 @@
 
 FROM ubuntu:jammy
 
+LABEL maintainer="DiskANN Development" \
+      version="1.0" \
+      description="DiskANN development environment with monitoring and analysis tools"
+
+# 設置時區與語言環境
+ENV TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive
+
 # 合併 apt 指令以減少層數，添加開發與監測工具
 RUN apt update && \
     apt install -y software-properties-common && \
@@ -16,7 +23,7 @@ RUN apt update && \
         libboost-dev libboost-program-options-dev \
         libmkl-full-dev libcpprest-dev \
         # OpenMP 運行時（修正 libomp.so.5 缺失問題）
-        libomp-dev libomp5 \
+        libomp-dev \
         # Python 開發工具
         python3.10 python3-pip python3-dev \
         # 性能監測工具
@@ -26,24 +33,20 @@ RUN apt update && \
         # 調試工具
         gdb valgrind strace \
         # 便利工具
-        vim less tree curl wget && \
-    apt clean && rm -rf /var/lib/apt/lists/*
+        vim less tree curl wget ca-certificates && \
+    apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# 配置 sensors（可選）
-RUN sensors-detect --auto || true
+# 驗證關鍵依賴安裝成功
+RUN ldconfig && \
+    pkg-config --exists libaio libboost_program_options || \
+    (echo "ERROR: 關鍵依賴未正確安裝" && exit 1)
 
-# 安裝 Python 資料科學與機器學習套件
-RUN pip3 install --no-cache-dir \
-    # 核心資料分析
-    pandas numpy scipy \
-    # 視覺化
-    matplotlib seaborn plotly \
-    # 機器學習
-    scikit-learn xgboost shap \
-    # Jupyter 環境
-    jupyter jupyterlab notebook \
-    # 便利工具
-    tqdm ipywidgets
+# 升級 pip 並安裝 Python 依賴（使用 requirements.txt 確保版本固定）
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir --upgrade pip setuptools && \
+    pip3 install --no-cache-dir -r /tmp/requirements.txt && \
+    rm /tmp/requirements.txt && \
+    pip3 cache purge
 
 # 為開發使用：掛載本地代碼而非 clone
 WORKDIR /workspace
