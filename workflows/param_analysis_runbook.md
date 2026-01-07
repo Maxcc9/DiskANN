@@ -1,4 +1,4 @@
-# Param Analysis Runbook
+# 參數分析完整流程
 
 > 從產生參數到分析輸出的一條龍流程，確保每次實驗都有獨立的輸出資料夾（建議設定 `EXPERIMENT_TAG`）。
 
@@ -6,6 +6,8 @@
 
 ```bash
 sudo apt install make cmake g++ libaio-dev libgoogle-perftools-dev clang-format libboost-all-dev libmkl-full-dev
+
+export DISKANN_ROOT="$(pwd)"
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target all -- -j4
@@ -21,7 +23,7 @@ wget ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz
 tar xzf sift.tar.gz
 
 # 將資料集轉檔
-cd /home/gt/research/DiskANN
+cd "$DISKANN_ROOT"
 
 # siftsmall
 build/apps/utils/fvecs_to_bin float data/siftsmall/siftsmall/siftsmall_base.fvecs data/siftsmall/siftsmall_base.bin
@@ -48,7 +50,7 @@ build/apps/utils/compute_groundtruth \
 ## B. 進入腳本目錄
 
 ```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
+cd "$DISKANN_ROOT/scripts/paramAnalysis/gridSearch"
 ```
 
 ## C. 流程總覽
@@ -80,7 +82,7 @@ python gen_build_configs.py
 ```bash
 EXPERIMENT_TAG=siftsmall01 NUM_THREADS=$(nproc) bash build_batch.sh --build-csv ./inputFiles/build_configs.csv
 
-EXPERIMENT_TAG=siftsmall01 NUM_THREADS=$(nproc) bash build_batch.sh --build-csv ./inputFiles/build_configs.csv --dataset sift
+EXPERIMENT_TAG=sift01 NUM_THREADS=$(nproc) bash build_batch.sh --build-csv ./inputFiles/build_configs.csv --dataset sift
 ```
 
 輸出：`outputFiles/build/siftsmall01/`
@@ -102,7 +104,7 @@ python gen_search_configs.py --dataset_size 10000 --max_cores $(nproc)
 ```bash
 EXPERIMENT_TAG=siftsmall01 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv
 
-EXPERIMENT_TAG=siftsmall01 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv --dataset sift
+EXPERIMENT_TAG=sift01 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv --dataset sift
 ```
 
 啟用 iostat 與 expanded nodes：
@@ -147,14 +149,14 @@ EXPERIMENT_TAG=siftsmall01 python collect.py
 用途：依研究計畫自動產出圖表與報表（QC、tradeoff、bottleneck、graph、worst-case 等）。
 
 ```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch/analysis
+cd "$DISKANN_ROOT/scripts/paramAnalysis/gridSearch/analysis"
 REPORT_PREFIX=siftsmall01 ./run_all_notebooks.py
 ```
 
 輸出：
 - `outputFiles/analyze/siftsmall01/figures/`
 - `outputFiles/analyze/siftsmall01/tables/`
-- `outputFiles/analyze/siftsmall01/summary.md`
+- `outputFiles/analyze/siftsmall01/summary.md`（含 00~06 重點摘要）
 
 ## D. 常用變數
 
@@ -163,6 +165,15 @@ REPORT_PREFIX=siftsmall01 ./run_all_notebooks.py
 - `TOPK`：Top‑K 節點數
 - `ENABLE_IOSTAT` / `IOSTAT_INTERVAL`：iostat 記錄控制
 - `ENABLE_EXPANDED_NODES` / `EXPANDED_NODES_LIMIT`：展開節點記錄控制
+- `FILTER_SEARCH_K`：分析階段只保留指定 K（預設 `10`）
+- `PLOT_MAX_POINTS`：圖表下採樣上限
+- `PLOT_LOG_LATENCY`：延遲圖使用 log 軸（`1`/`0`）
+- `QC_RECALL_THRESHOLD` / `QC_RECALL_PCTL`：QC 低召回門檻（固定/分位數）
+- `QC_OUTLIER_Z`：QC robust z 門檻
+- `SHAP_MAX_SAMPLES`：SHAP 抽樣上限
+- `MODEL_TEST_SIZE` / `MODEL_RANDOM_STATE`：surrogate 模型切分與隨機種子
+- `WORSTCASE_PCTL` / `WORSTCASE_MIN_COUNT`：worstcase 定義與分組下限
+- `BOTTLENECK_SHARE_THRESHOLD`：瓶頸分類門檻
 
 ## E. 範例：重跑新實驗
 
@@ -172,7 +183,7 @@ EXPERIMENT_TAG=exp02 bash build_batch.sh --build-csv ./inputFiles/build_configs.
 EXPERIMENT_TAG=exp02 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv
 
 EXPERIMENT_TAG=exp02 python collect.py
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch/analysis
+cd "$DISKANN_ROOT/scripts/paramAnalysis/gridSearch/analysis"
 
 REPORT_PREFIX=exp02 ./run_all_notebooks.py
 ```

@@ -1,234 +1,34 @@
-# Grid Search Param Analysis Workflow
+# 參數網格搜尋腳本參數索引
 
-This document summarizes the end-to-end flow for grid-search builds, searches, and offline analysis.
+> 本文件僅列出 `scripts/paramAnalysis/gridSearch/` 的腳本參數。完整流程請見 `workflows/param_analysis_runbook.md`。
 
-## 1) Generate Build Configs
+## 0) 共用說明
 
-Generate build parameter combinations:
+- 建議先設定 `DISKANN_ROOT`，避免硬編碼路徑。
+- 任何腳本若支援 `EXPERIMENT_TAG`，會在輸出目錄下建立獨立子資料夾。
 
-```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
-python gen_build_configs.py
-```
+## 1) gen_build_configs.py
 
-Outputs:
-- `scripts/paramAnalysis/gridSearch/inputFiles/build_configs.csv`
+用途：產生 `inputFiles/build_configs.csv`。  
+參數：目前無需額外參數。
 
-## 2) Batch Build Indexes
+## 2) gen_search_configs.py
 
-Build indexes from `build_configs.csv`:
-
-```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
-bash build_batch.sh --build-csv ./inputFiles/build_configs.csv
-```
-
-Named args example:
-
-```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
-bash build_batch.sh --build-csv ./inputFiles/build_configs.csv --dataset sift
-```
-
-Optional overrides:
-
-```bash
-BUILD_B=0.2 BUILD_M=1 NUM_THREADS=8 bash build_batch.sh --build-csv ./inputFiles/build_configs.csv
-```
-
-Per-experiment output folder:
-
-```bash
-EXPERIMENT_TAG=exp01 bash build_batch.sh --build-csv ./inputFiles/build_configs.csv
-```
-
-Named args + experiment tag:
-
-```bash
-EXPERIMENT_TAG=exp01 bash build_batch.sh --build-csv ./inputFiles/build_configs.csv --dataset sift
-```
-
-Outputs:
-- `scripts/paramAnalysis/gridSearch/outputFiles/build/*.index` and related files
-
-## 3) Generate Search Configs
-
-Generate search parameter combinations:
-
-```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
-python gen_search_configs.py --dataset_size 50000 --max_cores 16
-```
-
-Outputs:
-- `scripts/paramAnalysis/gridSearch/inputFiles/search_configs.csv`
-
-## 4) Batch Search (per-combination iostat supported)
-
-Run batch search:
-
-```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
-bash search_batch.sh --search-csv ./inputFiles/search_configs.csv
-```
-
-Named args example:
-
-```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
-bash search_batch.sh --search-csv ./inputFiles/search_configs.csv --dataset sift
-```
-
-Enable per-combination iostat logging:
-
-```bash
-ENABLE_IOSTAT=1 IOSTAT_INTERVAL=1 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv
-```
-
-Specify device:
-
-```bash
-ENABLE_IOSTAT=1 IOSTAT_DEVICE=/dev/nvme0n1 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv
-```
-
-Record expanded nodes (for offline hot/cold analysis):
-
-```bash
-ENABLE_EXPANDED_NODES=1 \
-EXPANDED_NODES_LIMIT=0 \
-bash search_batch.sh --search-csv ./inputFiles/search_configs.csv
-```
-
-Per-experiment output folder:
-
-```bash
-EXPERIMENT_TAG=exp01 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv
-```
-
-Named args + experiment tag:
-
-```bash
-EXPERIMENT_TAG=exp01 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv --dataset sift
-```
-
-Outputs:
-- Search results and logs under `scripts/paramAnalysis/gridSearch/outputFiles/search/`
-- Per-combination iostat logs: `*_iostat.log` next to the matching `*_summary_stats.csv`
-- Per-combination expanded nodes: `*_expanded_nodes.csv`
-- Output prefix note: `search_disk_index` will avoid duplicating `index_basename` if the result prefix already contains it.
-- Output prefix format: `S{search_id}_{index_tag}_W{W}_L{L}_K{K}_cache{cache}_T{threads}`
-
-## 5) Collect Summary Stats
-
-Aggregate all `*_summary_stats.csv` into one CSV:
-
-```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
-python collect.py
-```
-
-Optional output:
-
-```bash
-python collect.py -o ./outputFiles/analyze/exp01/collected_stats.csv
-```
-
-Per-experiment input folder:
-
-```bash
-EXPERIMENT_TAG=exp01 python collect.py
-```
-
-Outputs:
-- `scripts/paramAnalysis/gridSearch/outputFiles/analyze/{search_dir}/collected_stats_{search_dir}_{timestamp}.csv`
-- `scripts/paramAnalysis/gridSearch/outputFiles/analyze/{search_dir}/collected_topk_{search_dir}_{timestamp}.csv`
-
-## 6) Dump Neighbor Lists (Offline Analysis)
-
-Build the tool:
-
-```bash
-cmake --build /home/gt/research/DiskANN/build --target dump_disk_neighbors -- -j
-```
-
-Dump neighbor lists from expanded nodes:
-
-```bash
-/home/gt/research/DiskANN/build/apps/dump_disk_neighbors \
-  --data_type float \
-  --dist_fn l2 \
-  --index_path_prefix /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch/outputFiles/build/siftsmall_R64_L128_B0.2_M1 \
-  --input_nodes /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch/outputFiles/search/expanded_nodes.csv \
-  --output_path /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch/outputFiles/analyze/neighbors_dump.csv
-```
-
-Outputs:
-- Neighbor edge list: `node_id,degree,neighbor_pos,neighbor_id`
-
-## 7) Dump Neighbors for All Expanded Nodes (Batch)
-
-Dump neighbors for every `*_expanded_nodes.csv` under `outputFiles/search/`:
-
-```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
-bash dump_all_neighbors.sh
-```
-
-Per-experiment input folder:
-
-```bash
-EXPERIMENT_TAG=exp01 bash dump_all_neighbors.sh
-```
-
-Outputs:
-- For each expanded file: `*_neighbors.csv`
-
-## 8) Count Then Dump Top-K Neighbors
-
-Count expanded-node frequency, then dump neighbors for Top-K nodes:
-
-```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
-bash dump_topk_neighbors.sh ./outputFiles/search/<index_tag>/<prefix>_expanded_nodes.csv
-```
-
-Outputs:
-- `*_node_counts.csv` (node_id, count)
-- `*_topk{K}_nodes.txt`
-- `*_topk{K}_neighbors.csv`
-
-## 9) Batch Top-K Neighbors for All Runs
-
-Run Top-K neighbor dump for every `*_expanded_nodes.csv` under `outputFiles/search/`:
-
-```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
-bash dump_all_topk_neighbors.sh
-```
-
-Per-experiment input folder:
-
-```bash
-EXPERIMENT_TAG=exp01 bash dump_all_topk_neighbors.sh
-```
-
-## Optional: External iostat Wrapper
-
-If you want to measure arbitrary commands (not only search_batch):
-
-```bash
-cd /home/gt/research/DiskANN/scripts/paramAnalysis/gridSearch
-bash measure_queue_depth.sh "bash search_batch.sh --search-csv ./inputFiles/search_configs.csv"
-```
-
-## Reference: Input Parameters
-
-### build_batch.sh (`scripts/paramAnalysis/gridSearch/build_batch.sh`)
+用途：產生 `inputFiles/search_configs.csv`。
 
 | 參數類型 | 名稱 | 必填 | 預設 | 說明 |
 |---|---|---|---|---|
-| CLI | BUILD_CSV | 否 | `./inputFiles/build_configs.csv` | build 參數 CSV（含表頭 `build_id,build_R,build_L`） |
-| CLI | DATASET | 否 | `siftsmall` | 資料集名稱，用於預設資料路徑 |
+| CLI | `--dataset_size` | 否 |  | 資料集大小 |
+| CLI | `--max_cores` | 否 |  | 最大核心數 |
+
+## 3) build_batch.sh
+
+用途：批次建置 index。
+
+| 參數類型 | 名稱 | 必填 | 預設 | 說明 |
+|---|---|---|---|---|
+| CLI | BUILD_CSV | 否 | `./inputFiles/build_configs.csv` | build 參數 CSV |
+| CLI | DATASET | 否 | `siftsmall` | 資料集名稱 |
 | CLI | MAX_PARALLEL | 否 | `1` | 平行建置數 |
 | CLI | `--build-csv` | 否 |  | build 參數 CSV |
 | CLI | `--dataset` | 否 |  | 覆寫資料集名稱 |
@@ -247,11 +47,13 @@ bash measure_queue_depth.sh "bash search_batch.sh --search-csv ./inputFiles/sear
 | ENV | EXTRA_ARGS | 否 | 空 | 追加給 `build_disk_index` 的額外參數 |
 | ENV | DRY_RUN | 否 | `0` | `1` 僅輸出指令不執行 |
 
-### search_batch.sh (`scripts/paramAnalysis/gridSearch/search_batch.sh`)
+## 4) search_batch.sh
+
+用途：批次搜尋（可啟用 iostat / expanded nodes）。
 
 | 參數類型 | 名稱 | 必填 | 預設 | 說明 |
 |---|---|---|---|---|
-| CLI | SEARCH_CSV | 否 | `./inputFiles/search_configs.csv` | 搜尋參數 CSV（含表頭） |
+| CLI | SEARCH_CSV | 否 | `./inputFiles/search_configs.csv` | 搜尋參數 CSV |
 | CLI | DATASET | 否 | 自動解析 | 從 index 檔名解析，或手動覆寫 |
 | CLI | MAX_PARALLEL | 否 | `4` | 平行搜尋數（`ENABLE_IOSTAT=1` 時會強制為 1） |
 | CLI | `--search-csv` | 否 |  | 搜尋參數 CSV |
@@ -266,7 +68,7 @@ bash measure_queue_depth.sh "bash search_batch.sh --search-csv ./inputFiles/sear
 | ENV | GT_FILE | 否 | `${DATASET}_groundtruth.bin` | Ground truth 路徑 |
 | ENV | SEARCH_IO_LIMIT | 否 | 空 | `--search_io_limit` |
 | ENV | THREAD_OVERRIDE | 否 | 空 | 覆寫 `search_thread` |
-| ENV | EXTRA_ARGS | 否 | 空 | 追加給 `search_disk_index` 的參數（可用於 expanded nodes） |
+| ENV | EXTRA_ARGS | 否 | 空 | 追加給 `search_disk_index` 的參數 |
 | ENV | DRY_RUN | 否 | `0` | `1` 僅輸出指令不執行 |
 | ENV | ENABLE_IOSTAT | 否 | `0` | `1` 啟用每筆搜尋 iostat |
 | ENV | IOSTAT_INTERVAL | 否 | `1` | iostat 取樣秒數 |
@@ -276,24 +78,18 @@ bash measure_queue_depth.sh "bash search_batch.sh --search-csv ./inputFiles/sear
 | ENV | EXPANDED_NODES_LIMIT | 否 | `0` | 每個 query 最多記錄展開節點數（0 = unlimited） |
 | ENV | K_OVERRIDE | 否 | 空 | 覆寫 CSV 的 `search_K` |
 
-Output prefix behavior:
-- If `result_path` already includes `index_basename`, `search_disk_index` will not duplicate it in output filenames.
-- Prefix includes `K` to avoid collisions across different K values.
+## 5) collect.py
 
-補充說明：`EXTRA_ARGS`
-- 用途：將額外 CLI 參數原樣傳給 `search_disk_index`，避免每次新增/調整 CLI 選項都要改 `search_batch.sh`。
-- 典型用法：啟用擴充功能或實驗性參數，例如：
-  ```bash
-  EXTRA_ARGS="--record_expanded_nodes --expanded_nodes_path ./outputFiles/search/expanded_nodes.csv --expanded_nodes_limit 0" \
-    bash search_batch.sh --search-csv ./inputFiles/search_configs.csv
-  ```
+用途：彙總統計與 topk 結果。
 
-為何把重要設定放在 `EXTRA_ARGS`
-- `search_disk_index` 參數多、變動頻繁；集中在 `EXTRA_ARGS` 可維持腳本穩定、避免頻繁改動。
-- 方便實驗：臨時測試新旗標或不同組合時，無需改腳本或 CSV。
-- 降低耦合：`search_batch.sh` 專注負責流程與批次控制，功能細節交給 `search_disk_index`。
+| 參數類型 | 名稱 | 必填 | 預設 | 說明 |
+|---|---|---|---|---|
+| CLI | `-o` | 否 | 空 | 指定輸出檔案 |
+| ENV | EXPERIMENT_TAG | 否 | 空 | 只收集特定實驗資料夾 |
 
-### dump_disk_neighbors (`apps/dump_disk_neighbors.cpp`)
+## 6) dump_disk_neighbors
+
+用途：由 expanded nodes 轉出鄰居清單。
 
 | 參數類型 | 名稱 | 必填 | 預設 | 說明 |
 |---|---|---|---|---|
@@ -305,7 +101,9 @@ Output prefix behavior:
 | CLI | `--max_nodes` | 否 | `0` | 限制 unique node 數量（0 = all） |
 | CLI | `--keep_duplicates` | 否 | `false` | 保留重複 node_id |
 
-### dump_all_neighbors.sh (`scripts/paramAnalysis/gridSearch/dump_all_neighbors.sh`)
+## 7) dump_all_neighbors.sh
+
+用途：批次 dump 所有 `*_expanded_nodes.csv` 的鄰居清單。
 
 | 參數類型 | 名稱 | 必填 | 預設 | 說明 |
 |---|---|---|---|---|
@@ -318,12 +116,14 @@ Output prefix behavior:
 | ENV | KEEP_DUPLICATES | 否 | `0` | `1` 保留重複 node_id |
 | ENV | DRY_RUN | 否 | `0` | `1` 僅輸出指令不執行 |
 
-### dump_topk_neighbors.sh (`scripts/paramAnalysis/gridSearch/dump_topk_neighbors.sh`)
+## 8) dump_topk_neighbors.sh
+
+用途：對單一 expanded nodes 檔案做 Top‑K 鄰居輸出。
 
 | 參數類型 | 名稱 | 必填 | 預設 | 說明 |
 |---|---|---|---|---|
 | CLI | expanded_nodes_csv | 是 |  | `*_expanded_nodes.csv` 路徑 |
-| ENV | TOPK | 否 | `10` | Top-K node 數量 |
+| ENV | TOPK | 否 | `10` | Top‑K node 數量 |
 | ENV | OUTPUT_DIR | 否 | same as input | 輸出資料夾 |
 | ENV | BUILD_DIR | 否 | `./outputFiles/build` | 索引輸入資料夾 |
 | ENV | EXPERIMENT_TAG | 否 | 空 | 追加到預設 BUILD_DIR |
@@ -331,20 +131,24 @@ Output prefix behavior:
 | ENV | DIST_FN | 否 | `l2` | `dump_disk_neighbors --dist_fn` |
 | ENV | DRY_RUN | 否 | `0` | `1` 僅輸出指令不執行 |
 
-### dump_all_topk_neighbors.sh (`scripts/paramAnalysis/gridSearch/dump_all_topk_neighbors.sh`)
+## 9) dump_all_topk_neighbors.sh
+
+用途：批次對所有 expanded nodes 檔案做 Top‑K 鄰居輸出。
 
 | 參數類型 | 名稱 | 必填 | 預設 | 說明 |
 |---|---|---|---|---|
 | CLI | search_dir | 否 | `./outputFiles/search` | 搜尋輸出目錄 |
-| ENV | TOPK | 否 | `10` | Top-K node 數量 |
-| ENV | OUTPUT_DIR | 否 | empty | 若設定，所有輸出集中到此資料夾 |
+| ENV | TOPK | 否 | `10` | Top‑K node 數量 |
+| ENV | OUTPUT_DIR | 否 | 空 | 若設定，所有輸出集中到此資料夾 |
 | ENV | BUILD_DIR | 否 | `./outputFiles/build` | 索引輸入資料夾 |
 | ENV | EXPERIMENT_TAG | 否 | 空 | 追加到預設 SEARCH_DIR/BUILD_DIR |
 | ENV | DATA_TYPE | 否 | `float` | `dump_disk_neighbors --data_type` |
 | ENV | DIST_FN | 否 | `l2` | `dump_disk_neighbors --dist_fn` |
 | ENV | DRY_RUN | 否 | `0` | `1` 僅輸出指令不執行 |
 
-### measure_queue_depth.sh (`scripts/paramAnalysis/gridSearch/measure_queue_depth.sh`)
+## 10) measure_queue_depth.sh
+
+用途：包住任意命令並記錄 iostat。
 
 | 參數類型 | 名稱 | 必填 | 預設 | 說明 |
 |---|---|---|---|---|
@@ -353,3 +157,25 @@ Output prefix behavior:
 | ENV | OUTPUT_DIR | 否 | `./outputFiles/analyze` | iostat log 輸出資料夾 |
 | ENV | DEVICE | 否 | 空 | 指定裝置（如 `/dev/nvme0n1`） |
 | ENV | DATA_PATH | 否 | 空 | 用檔案路徑推估裝置 |
+
+## 11) analysis/run_all_notebooks.py
+
+用途：執行 00~06 notebooks 並產生 `summary.md`。
+
+| 參數類型 | 名稱 | 必填 | 預設 | 說明 |
+|---|---|---|---|---|
+| ENV | REPORT_PREFIX | 否 | `analysis_reports` | 報告輸出資料夾 |
+| ENV | COLLECT_PREFIX | 否 | `REPORT_PREFIX` | collect 輸入資料夾 |
+| ENV | FILTER_SEARCH_K | 否 | `10` | 僅分析指定 K |
+| ENV | PLOT_MAX_POINTS | 否 | `20000` | 圖表下採樣上限 |
+| ENV | PLOT_LOG_LATENCY | 否 | `1` | 延遲圖使用 log 軸 |
+| ENV | QC_RECALL_THRESHOLD | 否 | `0.7` | QC 低召回門檻 |
+| ENV | QC_RECALL_PCTL | 否 | `0` | QC 低召回分位數 |
+| ENV | QC_OUTLIER_Z | 否 | `4.0` | QC robust z 門檻 |
+| ENV | SHAP_MAX_SAMPLES | 否 | `2000` | SHAP 抽樣上限 |
+| ENV | MODEL_TEST_SIZE | 否 | `0.2` | surrogate 切分比例 |
+| ENV | MODEL_RANDOM_STATE | 否 | `42` | surrogate 隨機種子 |
+| ENV | WORSTCASE_PCTL | 否 | `0.95` | worstcase 分位數 |
+| ENV | WORSTCASE_MIN_COUNT | 否 | `10` | worstcase 分組下限 |
+| ENV | WORSTCASE_MAX_SAMPLES | 否 | `200` | worstcase 反事實抽樣上限 |
+| ENV | BOTTLENECK_SHARE_THRESHOLD | 否 | `0.5` | 瓶頸分類門檻 |
