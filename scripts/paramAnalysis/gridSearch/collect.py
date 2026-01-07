@@ -228,13 +228,14 @@ def parse_topk_files(base_prefix, node_counts_csv):
     return topk_rows, summary
 
 
-def collect_summary_stats(search_dir, output_file):
+def collect_summary_stats(search_dir, output_file, verbose=False):
     """
     蒐集所有 summary_stats.csv 並彙總到一個檔案
     
     Args:
         search_dir: search 輸出目錄
         output_file: 彙總輸出檔案路徑
+        verbose: 是否顯示詳細資訊
     
     Returns:
         成功處理的檔案數量
@@ -246,7 +247,10 @@ def collect_summary_stats(search_dir, output_file):
         print(f"警告: 在 {search_dir} 內找不到任何 *_summary_stats.csv 檔案", file=sys.stderr)
         return 0
     
-    print(f"找到 {len(summary_files)} 個 summary_stats.csv 檔案")
+    if verbose:
+        print(f"找到 {len(summary_files)} 個 summary_stats.csv 檔案")
+    else:
+        print(f"處理 {len(summary_files)} 個檔案...", end='', flush=True)
     
     all_data = []
     topk_data = []
@@ -286,7 +290,8 @@ def collect_summary_stats(search_dir, output_file):
             
             all_data.append(df)
             index_name = extract_index_info(summary_file)
-            print(f"  ✓ 已讀取: {summary_file} (index: {index_name}, 行數: {len(df)})")
+            if verbose:
+                print(f"  ✓ 已讀取: {summary_file} (index: {index_name}, 行數: {len(df)})")
 
             for row in topk_rows:
                 row["run_prefix"] = os.path.basename(base_prefix)
@@ -297,22 +302,25 @@ def collect_summary_stats(search_dir, output_file):
             print(f"  ✗ 讀取失敗: {summary_file} - {e}", file=sys.stderr)
             continue
     
+    if not verbose:
+        print(" 完成")
+    
     if not all_data:
         print("錯誤: 沒有成功讀取任何檔案", file=sys.stderr)
         return 0
     
     # 合併所有資料
-    print(f"\n正在合併 {len(all_data)} 個資料框...")
+    if verbose:
+        print(f"\n正在合併 {len(all_data)} 個資料框...")
     combined_df = pd.concat(all_data, ignore_index=True)
     
-    print(f"合併後總列數: {len(combined_df)}")
-    print(f"列名: {list(combined_df.columns)}")
+    if verbose:
+        print(f"合併後總列數: {len(combined_df)}")
+        print(f"列名: {list(combined_df.columns)}")
     
     # 儲存到輸出檔案
     combined_df.to_csv(output_file, index=False)
-    print(f"\n✓ 彙總完成，已儲存至: {output_file}")
-    print(f"  總行數: {len(combined_df)}")
-    print(f"  總列數: {len(combined_df.columns)}")
+    print(f"✓ 彙總完成: {output_file} ({len(combined_df)} 行, {len(combined_df.columns)} 列)")
     
     return len(all_data), topk_data
 
@@ -376,13 +384,14 @@ def main():
     output_dir = os.path.dirname(output_file)
     os.makedirs(output_dir, exist_ok=True)
     
-    print(f"搜尋目錄: {search_dir}")
-    print(f"輸出檔案: {output_file}")
-    print(f"Top-K 輸出檔案: {topk_output}")
-    print("-" * 60)
+    if args.verbose:
+        print(f"搜尋目錄: {search_dir}")
+        print(f"輸出檔案: {output_file}")
+        print(f"Top-K 輸出檔案: {topk_output}")
+        print("-" * 60)
     
     # 執行蒐集
-    count, topk_data = collect_summary_stats(search_dir, output_file)
+    count, topk_data = collect_summary_stats(search_dir, output_file, verbose=args.verbose)
     
     if count == 0:
         sys.exit(1)
@@ -394,27 +403,36 @@ def main():
         topk_df = topk_df[other_cols + path_cols]
         os.makedirs(os.path.dirname(topk_output), exist_ok=True)
         topk_df.to_csv(topk_output, index=False)
-        print(f"\n✓ Top-K 彙總完成，已儲存至: {topk_output}")
-        print(f"  總行數: {len(topk_df)}")
-        print(f"  總列數: {len(topk_df.columns)}")
+        print(f"✓ Top-K 彙總完成: {topk_output} ({len(topk_df)} 行, {len(topk_df.columns)} 列)")
     
     # 顯示統計資訊
-    print("\n" + "=" * 60)
-    print("統計資訊:")
-    print("=" * 60)
-    try:
-        df = pd.read_csv(output_file)
-        path_cols = [c for c in df.columns if c.endswith("_path") or c.endswith("_files")]
-        other_cols = [c for c in df.columns if c not in path_cols]
-        df = df[other_cols + path_cols]
-        df.to_csv(output_file, index=False)
-        print(f"總列數: {len(df)}")
-        print(f"ID 範圍: {df['id'].min()} - {df['id'].max()}")
-        print(f"列名: {list(df.columns)[:15]}...")
-        print("\n前 10 行:")
-        print(df.head(10).to_string())
-    except Exception as e:
-        print(f"無法讀取輸出檔案: {e}", file=sys.stderr)
+    if args.verbose:
+        print("\n" + "=" * 60)
+        print("統計資訊:")
+        print("=" * 60)
+        try:
+            df = pd.read_csv(output_file)
+            path_cols = [c for c in df.columns if c.endswith("_path") or c.endswith("_files")]
+            other_cols = [c for c in df.columns if c not in path_cols]
+            df = df[other_cols + path_cols]
+            df.to_csv(output_file, index=False)
+            print(f"總列數: {len(df)}")
+            print(f"ID 範圍: {df['id'].min()} - {df['id'].max()}")
+            print(f"列名: {list(df.columns)[:15]}...")
+            print("\n前 10 行:")
+            print(df.head(10).to_string())
+        except Exception as e:
+            print(f"無法讀取輸出檔案: {e}", file=sys.stderr)
+    else:
+        # 非 verbose 模式：只重新排序列，不印詳細資訊
+        try:
+            df = pd.read_csv(output_file)
+            path_cols = [c for c in df.columns if c.endswith("_path") or c.endswith("_files")]
+            other_cols = [c for c in df.columns if c not in path_cols]
+            df = df[other_cols + path_cols]
+            df.to_csv(output_file, index=False)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
