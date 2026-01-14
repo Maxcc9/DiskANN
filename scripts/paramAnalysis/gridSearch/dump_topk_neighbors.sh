@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 # Count expanded node frequency then dump neighbors for Top-K nodes.
+# Supports single file or batch mode (directory).
 
 set -euo pipefail
 
 usage() {
     cat <<'USAGE'
 Usage:
-  bash dump_topk_neighbors.sh <expanded_nodes_csv>
+  bash dump_topk_neighbors.sh <expanded_nodes_csv>    # Single file
+  bash dump_topk_neighbors.sh <search_dir>             # Batch mode (all *_expanded_nodes.csv)
 
 Args:
   expanded_nodes_csv   Path to *_expanded_nodes.csv
+  search_dir           Directory containing *_expanded_nodes.csv files
 
 Env overrides:
   TOPK=10             Top-K nodes by frequency
   OUTPUT_DIR           Default: same dir as expanded_nodes_csv
   BUILD_DIR            Default: ./outputFiles/build
-  EXPERIMENT_TAG       追加到預設 BUILD_DIR
+  EXPERIMENT_TAG       追加到預設 BUILD_DIR/SEARCH_DIR
   DATA_TYPE            Default: float
   DIST_FN              Default: l2
   DRY_RUN=1            Print commands only
@@ -30,8 +33,41 @@ DISKANN_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 APPS_DIR="${DISKANN_ROOT}/build/apps"
 DUMP_BIN="${APPS_DIR}/dump_disk_neighbors"
 
-EXPANDED_CSV="$1"
+INPUT_PATH="$1"
 TOPK="${TOPK:-10}"
+
+# Batch mode: if input is a directory, process all *_expanded_nodes.csv files
+if [[ -d "$INPUT_PATH" ]]; then
+    SEARCH_DIR="$INPUT_PATH"
+    echo "▶ Batch mode: processing all *_expanded_nodes.csv in ${SEARCH_DIR}"
+    
+    expanded_files=()
+    while IFS= read -r -d '' f; do
+        expanded_files+=("$f")
+    done < <(find "$SEARCH_DIR" -type f -name "*_expanded_nodes.csv" -print0)
+    
+    if [[ "${#expanded_files[@]}" -eq 0 ]]; then
+        echo "ERROR: No *_expanded_nodes.csv found in $SEARCH_DIR" >&2
+        exit 1
+    fi
+    
+    echo "Found ${#expanded_files[@]} file(s)"
+    for expanded_csv in "${expanded_files[@]}"; do
+        echo ""
+        echo "▶ Processing: ${expanded_csv}"
+        # Recursive call for each file
+        env TOPK="${TOPK}" OUTPUT_DIR="${OUTPUT_DIR:-}" BUILD_DIR="${BUILD_DIR:-}" \
+            DATA_TYPE="${DATA_TYPE:-float}" DIST_FN="${DIST_FN:-l2}" \
+            EXPERIMENT_TAG="${EXPERIMENT_TAG:-}" DRY_RUN="${DRY_RUN:-0}" \
+            bash "$0" "${expanded_csv}"
+    done
+    echo ""
+    echo "✓ Batch complete: processed ${#expanded_files[@]} file(s)"
+    exit 0
+fi
+
+# Single file mode
+EXPANDED_CSV="$INPUT_PATH"
 OUTPUT_DIR="${OUTPUT_DIR:-$(dirname "$EXPANDED_CSV")}"
 if [[ -z "${BUILD_DIR+x}" ]]; then
     BUILD_DIR_DEFAULT=1
