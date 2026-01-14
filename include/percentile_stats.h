@@ -49,7 +49,7 @@ struct QueryStats
     uint64_t frontier_io_iterations = 0;  // # of non-empty frontier IO batches
     double frontier_queue_depths_avg = 0.0;  // average frontier IO batch size
     uint64_t frontier_queue_depths_max = 0;  // maximum frontier IO batch size
-    uint64_t frontier_queue_depths_min = 0;  // minimum frontier IO batch size
+    uint64_t frontier_queue_depths_min = UINT64_MAX;  // minimum frontier IO batch size (init to max value)
     uint64_t reorder_queue_depths_total = 0; // total # of vectors read in reorder (= n_ios_reorder)
     
     std::vector<uint64_t> visited_out_degrees; // out-degree of each expanded node (for accurate percentile analysis)
