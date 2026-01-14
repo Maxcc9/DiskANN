@@ -50,12 +50,12 @@ inline std::string disk_row_base_header()
 inline std::string disk_row_base_values(const diskann::DiskStatRow &row)
 {
     std::ostringstream oss;
-    oss << std::fixed << std::setprecision(4);
     oss << row.dataset_name << "," << row.data_type << "," << row.build_R << "," << row.build_L << ","
-        << row.build_B << "," << row.build_M << "," << row.search_K << "," << row.search_L << ","
-        << row.search_W << "," << row.search_T << "," << row.search_io_limit << "," << row.num_queries << ","
-        << row.dataset_size << "," << row.vector_dim << "," << row.actual_cached_nodes << ","
-        << row.qps;
+        << std::fixed << std::setprecision(4) << row.build_B << "," << row.build_M << "," 
+        << row.search_K << "," << row.search_L << "," << row.search_W << "," << row.search_T << "," 
+        << row.search_io_limit << "," << row.num_queries << "," << row.dataset_size << "," 
+        << row.vector_dim << "," << row.actual_cached_nodes << "," 
+        << std::fixed << std::setprecision(4) << row.qps;
     return oss.str();
 }
 

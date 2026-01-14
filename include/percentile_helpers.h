@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <cmath>
 #include <algorithm>
+#include <type_traits>
 #include "percentile_stats.h"
 
 namespace diskann
@@ -76,11 +77,21 @@ struct MetricStats
     std::string to_csv_values(const PercentileSet &pset) const
     {
         std::ostringstream oss;
-        oss << std::fixed << std::setprecision(4) << mean << "," << geometric_mean;
-        for (float p : pset.percentiles)
-        {
-            auto it = percentiles.find(p);
-            oss << "," << (it != percentiles.end() ? it->second : T(0));
+        // 對於整數類型，不使用小數點；對於浮點類型，使用 4 位精度
+        if constexpr (std::is_integral<T>::value) {
+            oss << mean << "," << geometric_mean;
+            for (float p : pset.percentiles)
+            {
+                auto it = percentiles.find(p);
+                oss << "," << (it != percentiles.end() ? it->second : T(0));
+            }
+        } else {
+            oss << std::fixed << std::setprecision(4) << mean << "," << geometric_mean;
+            for (float p : pset.percentiles)
+            {
+                auto it = percentiles.find(p);
+                oss << "," << std::fixed << std::setprecision(4) << (it != percentiles.end() ? it->second : T(0));
+            }
         }
         return oss.str();
     }
