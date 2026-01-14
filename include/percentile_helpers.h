@@ -9,6 +9,8 @@
 #include <functional>
 #include <sstream>
 #include <iomanip>
+#include <cmath>
+#include <algorithm>
 #include "percentile_stats.h"
 
 namespace diskann
@@ -31,6 +33,7 @@ template <typename T>
 struct MetricStats
 {
     T mean = 0;
+    T geometric_mean = 0;  // 幾何平均數 (對延遲等對數正態分佈的指標更穩健)
     std::map<float, T> percentiles; // key: percentile value (0.0, 0.01, 0.5, ..., 1.0)
     
     // 輔助函數：按名稱獲取百分位數
@@ -61,7 +64,7 @@ struct MetricStats
     std::string to_csv_header(const std::string &prefix, const PercentileSet &pset) const
     {
         std::ostringstream oss;
-        oss << prefix << "_mean";
+        oss << prefix << "_mean," << prefix << "_gmean";
         for (float p : pset.percentiles)
         {
             oss << "," << prefix << "_p" << percentile_to_string(p);
@@ -73,7 +76,7 @@ struct MetricStats
     std::string to_csv_values(const PercentileSet &pset) const
     {
         std::ostringstream oss;
-        oss << std::fixed << std::setprecision(4) << mean;
+        oss << std::fixed << std::setprecision(4) << mean << "," << geometric_mean;
         for (float p : pset.percentiles)
         {
             auto it = percentiles.find(p);
@@ -101,6 +104,18 @@ MetricStats<T> compute_metric_stats(QueryStats *stats, uint64_t query_num, const
     // 計算平均值
     result.mean = get_mean_stats<T>(stats, query_num, extractor);
     
+    // 計算幾何平均數 (適用於對數正態分佈的指標，如延遲)
+    {
+        const double eps = 1e-6;
+        double sum_log = 0.0;
+        for (uint64_t qi = 0; qi < query_num; qi++)
+        {
+            double value = std::max<double>(static_cast<double>(extractor(stats[qi])), eps);
+            sum_log += std::log(value);
+        }
+        result.geometric_mean = static_cast<T>(std::exp(sum_log / static_cast<double>(query_num)));
+    }
+    
     // 計算所有百分位數（迴圈自動包含 p0 和 p100）
     for (float p : pset.percentiles)
     {
@@ -118,6 +133,26 @@ MetricStats<double> compute_metric_stats_from_vector(QueryStats *stats, uint64_t
     MetricStats<double> result;
     
     result.mean = get_mean_from_vector_field<T>(stats, query_num, extractor);
+    
+    // 計算幾何平均數（從 vector field）
+    {
+        const double eps = 1e-6;
+        double sum_log = 0.0;
+        uint64_t total_count = 0;
+        for (uint64_t qi = 0; qi < query_num; qi++)
+        {
+            const auto &vec = extractor(stats[qi]);
+            for (const auto &val : vec)
+            {
+                double value = std::max<double>(static_cast<double>(val), eps);
+                sum_log += std::log(value);
+                total_count++;
+            }
+        }
+        result.geometric_mean = (total_count > 0) 
+            ? std::exp(sum_log / static_cast<double>(total_count)) 
+            : 0.0;
+    }
     
     for (float p : pset.percentiles)
     {
