@@ -1359,6 +1359,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 
     uint32_t best_medoid = 0;
     float best_dist = (std::numeric_limits<float>::max)();
+    cpu_timer.reset();
     if (!use_filter)
     {
         for (uint64_t cur_m = 0; cur_m < _num_medoids; cur_m++)
@@ -1399,6 +1400,19 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     compute_dists(&best_medoid, 1, dist_scratch);
     retset.insert(Neighbor(best_medoid, dist_scratch[0]));
     visited.insert(best_medoid);
+    if (stats != nullptr)
+    {
+        stats->cpu_us += static_cast<float>(cpu_timer.elapsed_us_double());
+        if (!use_filter)
+            stats->n_cmps += (uint32_t)_num_medoids + 1; // medoids comparison + best_medoid compute_dists
+        else
+        {
+            if (_filter_to_medoid_ids.find(filter_label) != _filter_to_medoid_ids.end())
+            {
+                stats->n_cmps += (uint32_t)_filter_to_medoid_ids[filter_label].size() + 1; // filtered medoids + best_medoid
+            }
+        }
+    }
 
     uint32_t cmps = 0;
     uint32_t hops = 0;
@@ -1498,13 +1512,28 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             if (stats != nullptr)
             {
                 stats->n_ios += to_read;  // Only count what was actually read
+                stats->n_ios_search += to_read;  // Track search phase IO separately
                 if (to_read > 0)
                 {
-                    stats->queue_depth_sum += static_cast<uint64_t>(to_read);
-                    stats->queue_depth_count += 1;
-                    if (stats->queue_depth_max < to_read)
+                    // Accumulate frontier queue depth statistics
+                    stats->frontier_io_iterations++;
+                    // First iteration: initialize max/min with to_read value
+                    if (stats->frontier_io_iterations == 1)
                     {
-                        stats->queue_depth_max = to_read;
+                        stats->frontier_queue_depths_max = to_read;
+                        stats->frontier_queue_depths_min = to_read;
+                        stats->frontier_queue_depths_avg = to_read;
+                    }
+                    else
+                    {
+                        // Update max/min normally
+                        if (to_read > stats->frontier_queue_depths_max)
+                            stats->frontier_queue_depths_max = to_read;
+                        if (to_read < stats->frontier_queue_depths_min)
+                            stats->frontier_queue_depths_min = to_read;
+                        // Update running average
+                        double curr_sum = stats->frontier_queue_depths_avg * (stats->frontier_io_iterations - 1);
+                        stats->frontier_queue_depths_avg = (curr_sum + to_read) / stats->frontier_io_iterations;
                     }
                 }
             }
@@ -1524,6 +1553,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         // process cached nhoods
         for (auto &cached_nhood : cached_nhoods)
         {
+            cpu_timer.reset();
             auto global_cache_iter = _coord_cache.find(cached_nhood.first);
             T *node_fp_coords_copy = global_cache_iter->second;
             float cur_expanded_dist;
@@ -1540,17 +1570,17 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                         query_float, (uint8_t *)node_fp_coords_copy);
             }
             full_retset.push_back(Neighbor((uint32_t)cached_nhood.first, cur_expanded_dist));
+            if (stats != nullptr)
+            {
+                stats->cpu_us += static_cast<float>(cpu_timer.elapsed_us_double());
+                stats->n_cmps += 1; // node-query distance
+            }
 
             uint64_t nnbrs = cached_nhood.second.first;
             uint32_t *node_nbrs = cached_nhood.second.second;
             if (stats != nullptr)
             {
-                stats->visited_out_degree_sum += nnbrs;
-                stats->visited_out_degree_count += 1;
-                if (stats->visited_out_degree_max < nnbrs)
-                {
-                    stats->visited_out_degree_max = nnbrs;
-                }
+                stats->visited_out_degrees.push_back(nnbrs);
             }
 
             // compute node_nbrs <-> query dists in PQ space
@@ -1563,6 +1593,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             }
 
             // process prefetched nhood
+            cpu_timer.reset();
             for (uint64_t m = 0; m < nnbrs; ++m)
             {
                 uint32_t id = node_nbrs[m];
@@ -1580,6 +1611,10 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     retset.insert(nn);
                 }
             }
+            if (stats != nullptr)
+            {
+                stats->cpu_us += static_cast<float>(cpu_timer.elapsed_us_double());
+            }
         }
 #ifdef USE_BING_INFRA
         // process each frontier nhood - compute distances to unvisited nodes
@@ -1596,6 +1631,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         for (auto &frontier_nhood : frontier_nhoods)
         {
 #endif
+            cpu_timer.reset();
             char *node_disk_buf = offset_to_node(frontier_nhood.second, frontier_nhood.first);
             uint32_t *node_buf = offset_to_node_nhood(node_disk_buf);
             uint64_t nnbrs = (uint64_t)(*node_buf);
@@ -1616,12 +1652,12 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             full_retset.push_back(Neighbor(frontier_nhood.first, cur_expanded_dist));
             if (stats != nullptr)
             {
-                stats->visited_out_degree_sum += nnbrs;
-                stats->visited_out_degree_count += 1;
-                if (stats->visited_out_degree_max < nnbrs)
-                {
-                    stats->visited_out_degree_max = nnbrs;
-                }
+                stats->cpu_us += static_cast<float>(cpu_timer.elapsed_us_double());
+                stats->n_cmps += 1; // node-query distance
+            }
+            if (stats != nullptr)
+            {
+                stats->visited_out_degrees.push_back(nnbrs);
             }
             uint32_t *node_nbrs = (node_buf + 1);
             // compute node_nbrs <-> query dist in PQ space
@@ -1702,6 +1738,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             {
                 stats->n_4k++;
                 stats->n_ios++;
+                stats->n_ios_reorder++;  // Track reorder phase IO separately
+                stats->read_size += defaults::SECTOR_LEN;  // Each reorder read is one sector
             }
         }
 
@@ -1726,12 +1764,10 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         }
         if (stats != nullptr)
         {
-            stats->reorder_cpu_us += static_cast<float>(cpu_timer.elapsed_us_double());
             stats->n_cmps += (uint32_t)full_retset.size();
         }
 
         // Final sort by full-precision distance
-        cpu_timer.reset();
         std::sort(full_retset.begin(), full_retset.end());
         if (stats != nullptr)
         {
@@ -1771,6 +1807,9 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     if (stats != nullptr)
     {
         stats->total_us = static_cast<float>(query_timer.elapsed_us_double());
+
+        // Preserve frontier_queue_depths_* stats computed during search iterations.
+        stats->reorder_queue_depths_total = stats->n_ios_reorder;  // total vectors read in reorder
     }
 }
 
