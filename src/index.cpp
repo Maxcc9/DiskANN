@@ -855,6 +855,8 @@ std::pair<uint32_t, uint32_t> Index<T, TagT, LabelT>::iterate_to_fixed_point(
     };
 
     uint32_t visited_count = 0;
+    uint32_t hops = 0;
+    uint32_t cmps = 0;
 
     // Initialize the candidate pool with starting points
     for (auto id : init_ids)
@@ -892,11 +894,9 @@ std::pair<uint32_t, uint32_t> Index<T, TagT, LabelT>::iterate_to_fixed_point(
             Neighbor nn = Neighbor(id, distance);
             best_L_nodes.insert(nn);
             visited_count++;
+            cmps++;  // Count initial distance computation
         }
     }
-
-    uint32_t hops = 0;
-    uint32_t cmps = 0;
 
     while (best_L_nodes.has_unexpanded_node())
     {
