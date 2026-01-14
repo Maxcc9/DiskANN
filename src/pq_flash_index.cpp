@@ -1444,18 +1444,6 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         {
             auto nbr = retset.closest_unexpanded();
             num_seen++;
-            if (stats != nullptr && stats->expanded_nodes_enabled)
-            {
-                if (stats->expanded_nodes_limit == 0 ||
-                    stats->expanded_nodes.size() < static_cast<size_t>(stats->expanded_nodes_limit))
-                {
-                    stats->expanded_nodes.push_back(nbr.id);
-                }
-                else
-                {
-                    stats->expanded_nodes_dropped++;
-                }
-            }
             auto iter = _nhood_cache.find(nbr.id);
             if (iter != _nhood_cache.end())
             {
@@ -1553,6 +1541,20 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         // process cached nhoods
         for (auto &cached_nhood : cached_nhoods)
         {
+            // Record actual expanded node (cache hit case)
+            if (stats != nullptr && stats->expanded_nodes_enabled)
+            {
+                if (stats->expanded_nodes_limit == 0 ||
+                    stats->expanded_nodes.size() < static_cast<size_t>(stats->expanded_nodes_limit))
+                {
+                    stats->expanded_nodes.push_back(cached_nhood.first);
+                }
+                else
+                {
+                    stats->expanded_nodes_dropped++;
+                }
+            }
+            hops++;
             cpu_timer.reset();
             auto global_cache_iter = _coord_cache.find(cached_nhood.first);
             T *node_fp_coords_copy = global_cache_iter->second;
@@ -1627,9 +1629,40 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             assert(completedIndex >= 0);
             auto &frontier_nhood = frontier_nhoods[completedIndex];
             (*ctx.m_pRequestsStatus)[completedIndex] = IOContext::PROCESS_COMPLETE;
+            
+            // Record actual expanded node (disk case)
+            if (stats != nullptr && stats->expanded_nodes_enabled)
+            {
+                if (stats->expanded_nodes_limit == 0 ||
+                    stats->expanded_nodes.size() < static_cast<size_t>(stats->expanded_nodes_limit))
+                {
+                    stats->expanded_nodes.push_back(frontier_nhood.first);
+                }
+                else
+                {
+                    stats->expanded_nodes_dropped++;
+                }
+            }
+            
+            hops++;
 #else
         for (auto &frontier_nhood : frontier_nhoods)
         {
+            // Record actual expanded node (disk case)
+            if (stats != nullptr && stats->expanded_nodes_enabled)
+            {
+                if (stats->expanded_nodes_limit == 0 ||
+                    stats->expanded_nodes.size() < static_cast<size_t>(stats->expanded_nodes_limit))
+                {
+                    stats->expanded_nodes.push_back(frontier_nhood.first);
+                }
+                else
+                {
+                    stats->expanded_nodes_dropped++;
+                }
+            }
+            
+            hops++;
 #endif
             cpu_timer.reset();
             char *node_disk_buf = offset_to_node(frontier_nhood.second, frontier_nhood.first);
@@ -1694,8 +1727,6 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                 stats->cpu_us += static_cast<float>(cpu_timer.elapsed_us_double());
             }
         }
-
-        hops++;
     }
 
     if (stats != nullptr)
