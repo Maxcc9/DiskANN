@@ -173,24 +173,6 @@ MetricStats<double> compute_metric_stats_from_vector(QueryStats *stats, uint64_t
     return result;
 }
 
-// 輔助宏：簡化賦值過程
-#define ASSIGN_METRIC_STATS(row, prefix, stats) \
-    do { \
-        row.prefix##_mean = stats.mean; \
-        row.prefix##_min = stats.p0(); \
-        row.prefix##_p1 = stats.p1(); \
-        row.prefix##_p5 = stats.p5(); \
-        row.prefix##_p10 = stats.p10(); \
-        row.prefix##_p25 = stats.p25(); \
-        row.prefix##_p50 = stats.p50(); \
-        row.prefix##_p75 = stats.p75(); \
-        row.prefix##_p90 = stats.p90(); \
-        row.prefix##_p95 = stats.p95(); \
-        row.prefix##_p99 = stats.p99(); \
-        row.prefix##_p999 = stats.p999(); \
-        row.prefix##_max = stats.p100(); \
-    } while(0)
-
 // 管理多個指標的統計結果（用於動態 CSV 生成）
 template <typename T>
 struct MetricsCollection
