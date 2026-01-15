@@ -43,14 +43,17 @@ struct QueryStats
     uint64_t n_cache_hits = 0; // # cache_hits (快取命中次數)
     uint64_t n_hops = 0;       // # search hops
 
-    uint64_t visited_nodes = 0; // # unique visited nodes in search
+    uint64_t visited_nodes_count = 0; // # unique visited nodes in search
 
     // Per-query queue depth statistics (aggregated from all frontier IO batches)
     uint64_t frontier_io_iterations = 0;  // # of non-empty frontier IO batches
-    double frontier_queue_depths_avg = 0.0;  // average frontier IO batch size
+    double frontier_queue_depths_mean = 0.0;  // average frontier IO batch size
     uint64_t frontier_queue_depths_max = 0;  // maximum frontier IO batch size
     uint64_t frontier_queue_depths_min = UINT64_MAX;  // minimum frontier IO batch size (init to max value)
-    uint64_t reorder_queue_depths_total = 0; // total # of vectors read in reorder (= n_ios_reorder)
+    uint64_t reorder_io_iterations = 0;  // # of non-empty reorder IO batches
+    double reorder_queue_depths_mean = 0.0;  // average reorder IO batch size
+    uint64_t reorder_queue_depths_max = 0;  // maximum reorder IO batch size
+    uint64_t reorder_queue_depths_min = UINT64_MAX;  // minimum reorder IO batch size (init to max value)
     
     std::vector<uint64_t> visited_out_degrees; // out-degree of each expanded node (for accurate percentile analysis)
     

@@ -146,7 +146,7 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
     else
     {
         per_query_csv << "query_id,L,beamwidth,thread_id,total_us,io_us,cpu_us,n_ios,read_size,n_cmps,n_cache_hits,"
-                      << "n_hops,visited_nodes,recall_match_count\n";
+                      << "n_hops,visited_nodes_count,recall_match_count\n";
     }
 
     auto compute_recall_matches = [&](uint32_t query_idx, uint32_t test_id) -> uint32_t {
@@ -280,17 +280,17 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
             stats.data(), query_num, [](const diskann::QueryStats &s) { return s.n_hops; });
 
         auto visited_mean = diskann::get_mean_stats<uint32_t>(
-            stats.data(), query_num, [](const diskann::QueryStats &s) { return s.visited_nodes; });
+            stats.data(), query_num, [](const diskann::QueryStats &s) { return s.visited_nodes_count; });
         auto visited_p50 = diskann::get_percentile_stats<uint32_t>(
-            stats.data(), query_num, 0.5f, [](const diskann::QueryStats &s) { return s.visited_nodes; });
+            stats.data(), query_num, 0.5f, [](const diskann::QueryStats &s) { return s.visited_nodes_count; });
         auto visited_p90 = diskann::get_percentile_stats<uint32_t>(
-            stats.data(), query_num, 0.9f, [](const diskann::QueryStats &s) { return s.visited_nodes; });
+            stats.data(), query_num, 0.9f, [](const diskann::QueryStats &s) { return s.visited_nodes_count; });
         auto visited_p95 = diskann::get_percentile_stats<uint32_t>(
-            stats.data(), query_num, 0.95f, [](const diskann::QueryStats &s) { return s.visited_nodes; });
+            stats.data(), query_num, 0.95f, [](const diskann::QueryStats &s) { return s.visited_nodes_count; });
         auto visited_p99 = diskann::get_percentile_stats<uint32_t>(
-            stats.data(), query_num, 0.99f, [](const diskann::QueryStats &s) { return s.visited_nodes; });
+            stats.data(), query_num, 0.99f, [](const diskann::QueryStats &s) { return s.visited_nodes_count; });
         auto visited_max = diskann::get_max_stats<uint32_t>(
-            stats.data(), query_num, [](const diskann::QueryStats &s) { return s.visited_nodes; });
+            stats.data(), query_num, [](const diskann::QueryStats &s) { return s.visited_nodes_count; });
 
         diskann::MemoryStatRow row;
         row.L = L;
@@ -347,7 +347,7 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
                 oss << qi << "," << L << "," << L << "," << stats[qi].thread_id << "," << stats[qi].total_us << ","
                     << stats[qi].io_us << "," << stats[qi].cpu_us << "," << stats[qi].n_ios << ","
                     << stats[qi].read_size << "," << stats[qi].n_cmps << "," << stats[qi].n_cache_hits << ","
-                    << stats[qi].n_hops << "," << stats[qi].visited_nodes << "," << stats[qi].recall_match_count
+                    << stats[qi].n_hops << "," << stats[qi].visited_nodes_count << "," << stats[qi].recall_match_count
                     << "\n";
             }
             per_query_csv << oss.str();

@@ -1510,7 +1510,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     {
                         stats->frontier_queue_depths_max = to_read;
                         stats->frontier_queue_depths_min = to_read;
-                        stats->frontier_queue_depths_avg = to_read;
+                        stats->frontier_queue_depths_mean = to_read;
                     }
                     else
                     {
@@ -1520,8 +1520,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                         if (to_read < stats->frontier_queue_depths_min)
                             stats->frontier_queue_depths_min = to_read;
                         // Update running average
-                        double curr_sum = stats->frontier_queue_depths_avg * (stats->frontier_io_iterations - 1);
-                        stats->frontier_queue_depths_avg = (curr_sum + to_read) / stats->frontier_io_iterations;
+                        double curr_sum = stats->frontier_queue_depths_mean * (stats->frontier_io_iterations - 1);
+                        stats->frontier_queue_depths_mean = (curr_sum + to_read) / stats->frontier_io_iterations;
                     }
                 }
             }
@@ -1733,7 +1733,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     {
         // Accumulate rather than overwrite to preserve external recordings
         stats->n_hops += hops;
-        stats->visited_nodes += static_cast<unsigned>(visited.size());
+        stats->visited_nodes_count += static_cast<unsigned>(visited.size());
     }
 
     // re-sort by distance
@@ -1771,6 +1771,30 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                 stats->n_ios++;
                 stats->n_ios_reorder++;  // Track reorder phase IO separately
                 stats->read_size += defaults::SECTOR_LEN;  // Each reorder read is one sector
+            }
+        }
+
+        if (stats != nullptr)
+        {
+            const uint64_t to_read = static_cast<uint64_t>(vec_read_reqs.size());
+            if (to_read > 0)
+            {
+                stats->reorder_io_iterations++;
+                if (stats->reorder_io_iterations == 1)
+                {
+                    stats->reorder_queue_depths_max = to_read;
+                    stats->reorder_queue_depths_min = to_read;
+                    stats->reorder_queue_depths_mean = static_cast<double>(to_read);
+                }
+                else
+                {
+                    if (to_read > stats->reorder_queue_depths_max)
+                        stats->reorder_queue_depths_max = to_read;
+                    if (to_read < stats->reorder_queue_depths_min)
+                        stats->reorder_queue_depths_min = to_read;
+                    double curr_sum = stats->reorder_queue_depths_mean * (stats->reorder_io_iterations - 1);
+                    stats->reorder_queue_depths_mean = (curr_sum + to_read) / stats->reorder_io_iterations;
+                }
             }
         }
 
@@ -1840,7 +1864,6 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         stats->total_us = static_cast<float>(query_timer.elapsed_us_double());
 
         // Preserve frontier_queue_depths_* stats computed during search iterations.
-        stats->reorder_queue_depths_total = stats->n_ios_reorder;  // total vectors read in reorder
     }
 }
 
