@@ -131,7 +131,7 @@ bash search_batch.sh --search-csv ./inputFiles/search_configs.csv --max-parallel
 EXPERIMENT_TAG=siftsmall01 bash dump_all_neighbors.sh
 
 # Top‑K 熱點節點的鄰居（從 expanded nodes 的頻次統計；每次 run 僅處理一個 TOPK）
-EXPERIMENT_TAG=siftsmall01 TOPK=200 bash dump_topk_neighbors.sh
+EXPERIMENT_TAG=siftsmall01 TOPK=1000 bash dump_topk_neighbors.sh
 ```
 
 輸出：`outputFiles/search/siftsmall01/*_neighbors.csv`、`*_topk{K}_neighbors.csv`
