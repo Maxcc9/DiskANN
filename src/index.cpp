@@ -997,7 +997,7 @@ std::pair<uint32_t, uint32_t> Index<T, TagT, LabelT>::iterate_to_fixed_point(
         // Accumulate into external stats to avoid overriding prior recordings
         stats->n_hops += hops;
         stats->n_cmps += cmps;
-        stats->visited_nodes_count += visited_count;
+        stats->expanded_nodes_count += visited_count;
     }
 
     return std::make_pair(hops, cmps);

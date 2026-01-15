@@ -1582,7 +1582,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             uint32_t *node_nbrs = cached_nhood.second.second;
             if (stats != nullptr)
             {
-                stats->visited_out_degrees.push_back(nnbrs);
+                stats->expanded_node_out_degrees.push_back(nnbrs);
             }
 
             // compute node_nbrs <-> query dists in PQ space
@@ -1690,7 +1690,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             }
             if (stats != nullptr)
             {
-                stats->visited_out_degrees.push_back(nnbrs);
+                stats->expanded_node_out_degrees.push_back(nnbrs);
             }
             uint32_t *node_nbrs = (node_buf + 1);
             // compute node_nbrs <-> query dist in PQ space
@@ -1733,7 +1733,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     {
         // Accumulate rather than overwrite to preserve external recordings
         stats->n_hops += hops;
-        stats->visited_nodes_count += static_cast<unsigned>(visited.size());
+        stats->expanded_nodes_count += static_cast<unsigned>(visited.size());
     }
 
     // re-sort by distance

@@ -386,9 +386,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         {
             per_query_csv << "query_id,L,beamwidth,thread_id,total_us,io_us,cpu_us,sort_us,reorder_cpu_us,"
                           << "n_ios,n_4k,n_8k,n_12k,n_16k,read_size,n_cmps,n_cache_hits,n_hops,"
-                          << "visited_nodes_count,recall_match_count,frontier_queue_depth_mean,frontier_queue_depths_max,frontier_queue_depths_min,"
+                          << "expanded_nodes_count,recall_match_count,frontier_queue_depth_mean,frontier_queue_depths_max,frontier_queue_depths_min,"
                           << "reorder_queue_depth_mean,reorder_queue_depths_max,reorder_queue_depths_min,"
-                          << "visited_out_degree_mean,visited_out_degree_max\n";
+                          << "expanded_node_out_degree_mean,expanded_node_out_degree_max\n";
         }
     }
 
@@ -601,9 +601,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 
         // Calculate out-degree statistics from actual node out-degrees
         // (not from aggregated sum/count which would be incorrect)
-        auto visited_out_degree_stats = diskann::compute_metric_stats_from_vector<uint64_t>(
+        auto expanded_node_out_degree_stats = diskann::compute_metric_stats_from_vector<uint64_t>(
             stats, query_num, pset,
-            [](const auto &s) -> const std::vector<uint64_t>& { return s.visited_out_degrees; }
+            [](const auto &s) -> const std::vector<uint64_t>& { return s.expanded_node_out_degrees; }
         );
 
         auto cache_hit_rate_stats = diskann::compute_metric_stats<double>(
@@ -619,9 +619,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             [](const auto &s) { return s.n_hops; }
         );
 
-        auto visited_node_count_stats = diskann::compute_metric_stats<double>(
+        auto expanded_node_count_stats = diskann::compute_metric_stats<double>(
             stats, query_num, pset,
-            [](const auto &s) { return s.visited_nodes_count; }
+            [](const auto &s) { return s.expanded_nodes_count; }
         );
 
         // Calculate thread utilization statistics
@@ -640,24 +640,20 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             }
             
             std::vector<double> thread_utils(num_threads, 0.0);
-            double sum = 0.0;
             for (uint32_t tid = 0; tid < num_threads; tid++)
             {
                 thread_utils[tid] = thread_busy_us[tid] / wall_time_us;
-                sum += thread_utils[tid];
             }
-            thread_util_stats.mean = sum / static_cast<double>(num_threads);
-            
-            std::sort(thread_utils.begin(), thread_utils.end());
-            for (float p : pset.percentiles)
+            // Reuse QueryStats::total_us as a carrier for thread utilization values.
+            std::vector<diskann::QueryStats> thread_stats(num_threads);
+            for (uint32_t tid = 0; tid < num_threads; tid++)
             {
-                const double clamped = std::max(0.0, std::min(1.0, static_cast<double>(p)));
-                const size_t last = thread_utils.size() - 1;
-                size_t idx = static_cast<size_t>(clamped * last);
-                if (idx >= thread_utils.size())
-                    idx = thread_utils.size() - 1;
-                thread_util_stats.percentiles[p] = thread_utils[idx];
+                thread_stats[tid].total_us = static_cast<float>(thread_utils[tid]);
             }
+            thread_util_stats = diskann::compute_metric_stats<double>(
+                thread_stats.data(), thread_stats.size(), pset,
+                [](const diskann::QueryStats &s) { return static_cast<double>(s.total_us); }
+            );
         }
 
         // Calculate recall statistics (only when ground truth is available)
@@ -711,12 +707,18 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         
         // === 構建 MetricsCollection，存儲所有動態百分位數指標 ===
         diskann::MetricsCollection<double> metrics_coll(pset);
-        metrics_coll.add("visited_out_degree", visited_out_degree_stats);
+
+        metrics_coll.add("recall", recall_stats);
+        metrics_coll.add("hop", hop_stats);
+        metrics_coll.add("compares", compares_stats);
+        metrics_coll.add("cache_hit_rate", cache_hit_rate_stats);
+
         metrics_coll.add("latency_us", latency_stats);
-        metrics_coll.add("ios", ios_stats);
         metrics_coll.add("io_us", io_us_stats);
         metrics_coll.add("cpu_us", cpu_us_stats);
         metrics_coll.add("sort_us", sort_us_stats);
+
+        metrics_coll.add("ios", ios_stats);
         metrics_coll.add("read_size", read_size_stats);
         metrics_coll.add("frontier_queue_depth_mean", frontier_queue_depth_mean_stats);
         metrics_coll.add("frontier_queue_depth_max", frontier_queue_depth_max_stats);
@@ -724,12 +726,10 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         metrics_coll.add("reorder_queue_depth_mean", reorder_queue_depth_mean_stats);
         metrics_coll.add("reorder_queue_depth_max", reorder_queue_depth_max_stats);
         metrics_coll.add("reorder_queue_depth_min", reorder_queue_depth_min_stats);
-        metrics_coll.add("compares", compares_stats);
-        metrics_coll.add("recall", recall_stats);
-        metrics_coll.add("cache_hit_rate", cache_hit_rate_stats);
-        metrics_coll.add("hop", hop_stats);
-        metrics_coll.add("visited_node_count", visited_node_count_stats);
         metrics_coll.add("thread_util", thread_util_stats);
+
+        metrics_coll.add("expanded_node_count", expanded_node_count_stats);
+        metrics_coll.add("expanded_node_out_degree", expanded_node_out_degree_stats);
         metrics_summary.push_back(metrics_coll);
 
         diskann::cout << std::setw(6) << L << std::setw(12) << optimized_beamwidth << std::setw(16) << qps
@@ -758,32 +758,33 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                     (stats[qi].reorder_io_iterations == 0 || stats[qi].reorder_queue_depths_min == UINT64_MAX)
                     ? 0 : stats[qi].reorder_queue_depths_min;
                 
-                double visited_out_degree_mean = 0.0;
-                uint64_t visited_out_degree_max = 0;
-                if (!stats[qi].visited_out_degrees.empty())
+                double expanded_node_out_degree_mean = 0.0;
+                uint64_t expanded_node_out_degree_max = 0;
+                if (!stats[qi].expanded_node_out_degrees.empty())
                 {
                     double sum = 0.0;
-                    for (const auto val : stats[qi].visited_out_degrees)
+                    for (const auto val : stats[qi].expanded_node_out_degrees)
                     {
                         sum += static_cast<double>(val);
-                        if (val > visited_out_degree_max)
+                        if (val > expanded_node_out_degree_max)
                         {
-                            visited_out_degree_max = val;
+                            expanded_node_out_degree_max = val;
                         }
                     }
-                    visited_out_degree_mean = sum / static_cast<double>(stats[qi].visited_out_degrees.size());
+                    expanded_node_out_degree_mean =
+                        sum / static_cast<double>(stats[qi].expanded_node_out_degrees.size());
                 }
                 oss << qi << "," << L << "," << optimized_beamwidth << "," << stats[qi].thread_id << ","
                     << stats[qi].total_us << "," << stats[qi].io_us << "," << stats[qi].cpu_us << ","
                     << stats[qi].sort_us << "," << stats[qi].reorder_cpu_us << ","
                     << stats[qi].n_ios << "," << stats[qi].n_4k << "," << stats[qi].n_8k << "," << stats[qi].n_12k
                     << "," << stats[qi].n_16k << "," << stats[qi].read_size << "," << stats[qi].n_cmps << ","
-                    << stats[qi].n_cache_hits << "," << stats[qi].n_hops << "," << stats[qi].visited_nodes_count << ","
+                    << stats[qi].n_cache_hits << "," << stats[qi].n_hops << "," << stats[qi].expanded_nodes_count << ","
                     << stats[qi].recall_match_count << "," << frontier_queue_depth_mean << ","
                     << stats[qi].frontier_queue_depths_max << "," << frontier_queue_depth_min << ","
                     << reorder_queue_depth_mean << "," << stats[qi].reorder_queue_depths_max << ","
                     << reorder_queue_depth_min << ","
-                    << visited_out_degree_mean << "," << visited_out_degree_max << "\n";
+                    << expanded_node_out_degree_mean << "," << expanded_node_out_degree_max << "\n";
             }
             per_query_csv << oss.str();
         }

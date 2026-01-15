@@ -178,12 +178,17 @@ template <typename T>
 struct MetricsCollection
 {
     std::map<std::string, MetricStats<T>> metrics;  // key: metric name (e.g., "latency", "ios")
+    std::vector<std::string> order; // preserve insertion order for CSV output
     PercentileSet pset;
     
     MetricsCollection(const PercentileSet &p) : pset(p) {}
     
     void add(const std::string &name, const MetricStats<T> &stats)
     {
+        if (metrics.find(name) == metrics.end())
+        {
+            order.push_back(name);
+        }
         metrics[name] = stats;
     }
     
@@ -192,10 +197,15 @@ struct MetricsCollection
     {
         std::ostringstream oss;
         bool first = true;
-        for (const auto &[name, stats] : metrics)
+        for (const auto &name : order)
         {
+            auto it = metrics.find(name);
+            if (it == metrics.end())
+            {
+                continue;
+            }
             if (!first) oss << ",";
-            oss << stats.to_csv_header(name, pset);
+            oss << it->second.to_csv_header(name, pset);
             first = false;
         }
         return oss.str();
@@ -206,10 +216,15 @@ struct MetricsCollection
     {
         std::ostringstream oss;
         bool first = true;
-        for (const auto &[name, stats] : metrics)
+        for (const auto &name : order)
         {
+            auto it = metrics.find(name);
+            if (it == metrics.end())
+            {
+                continue;
+            }
             if (!first) oss << ",";
-            oss << stats.to_csv_values(pset);
+            oss << it->second.to_csv_values(pset);
             first = false;
         }
         return oss.str();

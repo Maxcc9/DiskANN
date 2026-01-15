@@ -43,7 +43,7 @@ struct QueryStats
     uint64_t n_cache_hits = 0; // # cache_hits (快取命中次數)
     uint64_t n_hops = 0;       // # search hops
 
-    uint64_t visited_nodes_count = 0; // # unique visited nodes in search
+    uint64_t expanded_nodes_count = 0; // # unique visited nodes in search
 
     // Per-query queue depth statistics (aggregated from all frontier IO batches)
     uint64_t frontier_io_iterations = 0;  // # of non-empty frontier IO batches
@@ -55,7 +55,7 @@ struct QueryStats
     uint64_t reorder_queue_depths_max = 0;  // maximum reorder IO batch size
     uint64_t reorder_queue_depths_min = UINT64_MAX;  // minimum reorder IO batch size (init to max value)
     
-    std::vector<uint64_t> visited_out_degrees; // out-degree of each expanded node (for accurate percentile analysis)
+    std::vector<uint64_t> expanded_node_out_degrees; // out-degree of each expanded node (for accurate percentile analysis)
     
     bool expanded_nodes_enabled = false; // enable recording expanded node ids
     uint32_t expanded_nodes_limit = 0; // max expanded nodes to record (0 = unlimited)
