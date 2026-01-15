@@ -69,12 +69,12 @@ fi
 # Single file mode
 EXPANDED_CSV="$INPUT_PATH"
 OUTPUT_DIR="${OUTPUT_DIR:-$(dirname "$EXPANDED_CSV")}"
-if [[ -z "${BUILD_DIR+x}" ]]; then
+if [[ -z "${BUILD_DIR:-}" ]]; then
     BUILD_DIR_DEFAULT=1
     BUILD_DIR="${SCRIPT_DIR}/outputFiles/build"
 else
     BUILD_DIR_DEFAULT=0
-    BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/outputFiles/build}"
+    BUILD_DIR="${BUILD_DIR}"
 fi
 EXPERIMENT_TAG="${EXPERIMENT_TAG:-}"
 if [[ -n "$EXPERIMENT_TAG" && "$BUILD_DIR_DEFAULT" -eq 1 ]]; then
@@ -120,23 +120,31 @@ topk = int(topk)
 
 counter = Counter()
 with open(expanded_csv, newline="") as f:
-    reader = csv.reader(f)
-    header = next(reader, None)
+    reader = csv.DictReader(f)
+    # 驗證欄位是否存在，避免硬寫索引造成的脆弱性
+    if reader.fieldnames is None or "node_id" not in reader.fieldnames:
+        print(f"ERROR: 'node_id' column not found in {expanded_csv}", file=sys.stderr)
+        if reader.fieldnames:
+            print(f"Available columns: {reader.fieldnames}", file=sys.stderr)
+        sys.exit(1)
+    # 逐行計數每個 node_id 的展開次數
     for row in reader:
-        if not row:
+        if not row or not row.get("node_id"):
             continue
-        node_id = row[-1].strip()
-        if not node_id:
-            continue
-        counter[node_id] += 1
+        node_id = row["node_id"].strip()
+        if node_id:
+            counter[node_id] += 1
 
+# 按展開次數降序排列，相同次數按 node_id 數值升序
 items = sorted(counter.items(), key=lambda x: (-x[1], int(x[0])))
 
+# 輸出節點計數表
 with open(counts_csv, "w", newline="") as f:
     writer = csv.writer(f)
     writer.writerow(["node_id", "count"])
     writer.writerows(items)
 
+# 輸出 Top-K 節點清單
 with open(topk_nodes, "w") as f:
     for node_id, _count in items[:topk]:
         f.write(f"{node_id}\n")
