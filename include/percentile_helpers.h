@@ -35,6 +35,10 @@ struct MetricStats
 {
     T mean = 0;
     T geometric_mean = 0;  // 幾何平均數 (對延遲等對數正態分佈的指標更穩健)
+    double variance = 0.0;
+    double stddev = 0.0;
+    double iqr = 0.0;
+    double cv = 0.0;
     std::map<float, T> percentiles; // key: percentile value (0.0, 0.01, 0.5, ..., 1.0)
     
     // 輔助函數：按名稱獲取百分位數
@@ -65,7 +69,8 @@ struct MetricStats
     std::string to_csv_header(const std::string &prefix, const PercentileSet &pset) const
     {
         std::ostringstream oss;
-        oss << prefix << "_mean," << prefix << "_gmean";
+        oss << prefix << "_mean," << prefix << "_gmean," << prefix << "_var," << prefix << "_std,"
+            << prefix << "_iqr," << prefix << "_cv";
         for (float p : pset.percentiles)
         {
             oss << "," << prefix << "_p" << percentile_to_string(p);
@@ -79,14 +84,15 @@ struct MetricStats
         std::ostringstream oss;
         // 對於整數類型，不使用小數點；對於浮點類型，使用 4 位精度
         if constexpr (std::is_integral<T>::value) {
-            oss << mean << "," << geometric_mean;
+            oss << mean << "," << geometric_mean << "," << variance << "," << stddev << "," << iqr << "," << cv;
             for (float p : pset.percentiles)
             {
                 auto it = percentiles.find(p);
                 oss << "," << (it != percentiles.end() ? it->second : T(0));
             }
         } else {
-            oss << std::fixed << std::setprecision(4) << mean << "," << geometric_mean;
+            oss << std::fixed << std::setprecision(4) << mean << "," << geometric_mean << "," << variance << ","
+                << stddev << "," << iqr << "," << cv;
             for (float p : pset.percentiles)
             {
                 auto it = percentiles.find(p);
@@ -115,6 +121,24 @@ MetricStats<T> compute_metric_stats(QueryStats *stats, uint64_t query_num, const
     // 計算平均值
     result.mean = get_mean_stats<T>(stats, query_num, extractor);
     
+    // 計算變異數與標準差
+    if (query_num > 0)
+    {
+        double sum_sq = 0.0;
+        for (uint64_t qi = 0; qi < query_num; qi++)
+        {
+            const double value = static_cast<double>(extractor(stats[qi]));
+            const double diff = value - static_cast<double>(result.mean);
+            sum_sq += diff * diff;
+        }
+        result.variance = sum_sq / static_cast<double>(query_num);
+        result.stddev = std::sqrt(result.variance);
+        if (result.mean != 0.0)
+        {
+            result.cv = result.stddev / std::abs(static_cast<double>(result.mean));
+        }
+    }
+    
     // 計算幾何平均數 (適用於對數正態分佈的指標，如延遲)
     {
         const double eps = 1e-6;
@@ -131,6 +155,16 @@ MetricStats<T> compute_metric_stats(QueryStats *stats, uint64_t query_num, const
     for (float p : pset.percentiles)
     {
         result.percentiles[p] = get_percentile_stats<T>(stats, query_num, p, extractor);
+    }
+
+    if (!pset.percentiles.empty())
+    {
+        const auto p25 = result.percentiles.find(0.25f);
+        const auto p75 = result.percentiles.find(0.75f);
+        if (p25 != result.percentiles.end() && p75 != result.percentiles.end())
+        {
+            result.iqr = static_cast<double>(p75->second) - static_cast<double>(p25->second);
+        }
     }
     
     return result;
