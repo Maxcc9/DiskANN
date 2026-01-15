@@ -111,9 +111,9 @@ EXPERIMENT_TAG=sift01 bash search_batch.sh --search-csv ./inputFiles/search_conf
 
 ```bash
 EXPERIMENT_TAG=siftsmall01 \
-ENABLE_IOSTAT=1 IOSTAT_INTERVAL=1 \
+ENABLE_IOSTAT=1 IOSTAT_INTERVAL=0.5 \
 ENABLE_EXPANDED_NODES=1 EXPANDED_NODES_LIMIT=0 \
-COOLDOWN_TEMP_C=60 COOLDOWN_CHECK_INTERVAL=15 TEMP_DEVICE=/dev/nvme0 \
+COOLDOWN_TEMP_C=60 COOLDOWN_CHECK_INTERVAL=15 TEMP_DEVICE=/dev/nvme1 \
 NVME_USE_SUDO=0 \
 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv --max-parallel 1
 ```
@@ -122,15 +122,18 @@ bash search_batch.sh --search-csv ./inputFiles/search_configs.csv --max-parallel
 
 ### 5) 產生鄰居資訊（必做）
 
-用途：將 expanded_nodes 轉為鄰居列表，供冷／熱節點結構分析。
+用途：將 `*_expanded_nodes.csv` 轉為鄰居列表，供冷／熱節點結構分析。  
+注意：此步驟依賴 `ENABLE_EXPANDED_NODES=1` 產生的檔案，若第 4 步未啟用 expanded nodes，這一步會找不到輸入檔。
 
 ```bash
+# 轉出全部 expanded nodes 的鄰居
 EXPERIMENT_TAG=siftsmall01 bash dump_all_neighbors.sh
 
-EXPERIMENT_TAG=siftsmall01 TOPK=200 bash dump_all_topk_neighbors.sh
+# Top‑K 熱點節點的鄰居（從 expanded nodes 的頻次統計）
+EXPERIMENT_TAG=siftsmall01 TOPK=200 bash dump_topk_neighbors.sh outputFiles/search/siftsmall01
 ```
 
-輸出：`outputFiles/search/siftsmall01/*_neighbors.csv`、`*_topk{K}_*`
+輸出：`outputFiles/search/siftsmall01/*_neighbors.csv`、`*_topk{K}_neighbors.csv`
 
 ### 6) 彙總統計
 
@@ -141,8 +144,7 @@ EXPERIMENT_TAG=siftsmall01 python collect.py
 ```
 
 輸出：
-- `outputFiles/analyze/siftsmall01/collected_stats_siftsmall01_<timestamp>.csv`
-- `outputFiles/analyze/siftsmall01/collected_topk_siftsmall01_<timestamp>.csv`
+- `outputFiles/analyze/siftsmall01/collected_all_siftsmall01_<timestamp>.csv`
 
 ### 7) 執行分析（00~06 notebooks）
 
@@ -166,6 +168,8 @@ REPORT_PREFIX=siftsmall01 ./run_all_notebooks.py
 - `ENABLE_IOSTAT` / `IOSTAT_INTERVAL`：iostat 記錄控制
 - `ENABLE_EXPANDED_NODES` / `EXPANDED_NODES_LIMIT`：展開節點記錄控制
 - `FILTER_SEARCH_K`：分析階段只保留指定 K（預設 `10`）
+- `ENABLE_SUMMARY_STATS`：是否輸出 summary stats（`1`/`0`，預設 `1`）
+- `ENABLE_PER_QUERY_STATS`：是否輸出 per-query stats（`1`/`0`，預設 `0`）
 - `PLOT_MAX_POINTS`：圖表下採樣上限
 - `PLOT_LOG_LATENCY`：延遲圖使用 log 軸（`1`/`0`）
 - `QC_RECALL_THRESHOLD` / `QC_RECALL_PCTL`：QC 低召回門檻（固定/分位數）
