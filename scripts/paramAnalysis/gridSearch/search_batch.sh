@@ -316,6 +316,7 @@ run_one() {
     local K_value="${K_OVERRIDE:-${K}}"
     local result_prefix="${result_dir}/S${search_tag}_${index_tag}_W${W}_L${L}_K${K_value}_cache${cache}_T${threads}"
     local stats_csv="${result_prefix}_summary_stats.csv"
+    local per_query_csv="${result_prefix}_query_stats.csv"
     local iostat_log="${stats_csv%_summary_stats.csv}_iostat.log"
     local expanded_nodes_csv="${stats_csv%_summary_stats.csv}_expanded_nodes.csv"
 
@@ -344,13 +345,18 @@ run_one() {
         --query_file "${query_file}"
         --gt_file "${gt_file}"
         --result_path "${result_prefix}"
-        --stats_csv_path "${stats_csv}"
         --num_nodes_to_cache "${cache}"
         --num_threads "${thread_value}"
         -K "${K_value}"
         -L "${L}"
         -W "${W}"
     )
+    if [[ "${ENABLE_SUMMARY_STATS:-1}" != "0" ]]; then
+        cmd+=(--stats_csv_path "${stats_csv}")
+    fi
+    if [[ "${ENABLE_PER_QUERY_STATS:-0}" == "1" ]]; then
+        cmd+=(--per_query_stats_path "${per_query_csv}")
+    fi
     if [[ "$ENABLE_EXPANDED_NODES" == "1" ]]; then
         cmd+=(--record_expanded_nodes --expanded_nodes_path "${expanded_nodes_csv}" --expanded_nodes_limit "${EXPANDED_NODES_LIMIT}")
     fi
