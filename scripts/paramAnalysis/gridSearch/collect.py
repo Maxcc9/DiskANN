@@ -152,7 +152,7 @@ def parse_iostat_log(iostat_log):
 
 def parse_topk_files(base_prefix, node_counts_csv):
     """
-    解析 Top-K 相關輸出檔案，彙整每個 K 變體的圖統計與覆蓋率。
+    解析 Top-K 相關輸出檔案，彙整單一 K 的圖統計與覆蓋率。
 
     參數：
       - base_prefix：某次 run 的前綴（不含尾端的 _summary_stats.csv）
@@ -164,12 +164,9 @@ def parse_topk_files(base_prefix, node_counts_csv):
     neighbors_files = sorted(glob.glob(f"{base_prefix}_topk*_neighbors.csv"))
     
     if not neighbors_files:
-        return topk_rows, {
-            "topk_variants_count": 0,
-            "topk_k_list": "",
-            "topk_neighbors_files": "",
-            "topk_nodes_files": "",
-        }
+        return topk_rows, {}
+    if len(neighbors_files) > 1:
+        print(f"WARN: multiple topk neighbors files found; using first: {neighbors_files[0]}", file=sys.stderr)
     
     # 預先載入節點計數資料與 nodes 檔案映射
     node_counts_df = None
@@ -184,70 +181,55 @@ def parse_topk_files(base_prefix, node_counts_csv):
         except Exception:
             pass
     
-    nodes_map = {}
-    for path in glob.glob(f"{base_prefix}_topk*_nodes.txt"):
-        m = re.search(r"_topk(\d+)_nodes\.txt$", path)
-        if m:
-            nodes_map[int(m.group(1))] = path
-    
-    # 處理每個 neighbors.csv
-    for neighbors_path in neighbors_files:
-        m = re.search(r"_topk(\d+)_neighbors\.csv$", neighbors_path)
-        if not m:
-            continue
-        
-        topk = int(m.group(1))
-        row = {"topk_k": topk, "topk_neighbors_path": neighbors_path}
-        
+    neighbors_path = neighbors_files[0]
+    m = re.search(r"_topk(\d+)_neighbors\.csv$", neighbors_path)
+    if not m:
+        return topk_rows, {}
+
+    topk = int(m.group(1))
+    row = {"topk_k": topk, "topk_neighbors_path": neighbors_path}
+
+    try:
+        df = pd.read_csv(neighbors_path)
+        if df.empty:
+            topk_rows.append(row)
+            return topk_rows, {}
+
+        required_cols = {"node_id", "neighbor_id", "degree"}
+        if not required_cols.issubset(df.columns):
+            topk_rows.append(row)
+            return topk_rows, {}
+
+        # 基本統計
+        row["topk_expanded_neighbor_count"] = int(len(df))
+        row["topk_expanded_unique_count"] = int(df["node_id"].nunique())
+        row["topk_expanded_unique_neighbors_count"] = int(df["neighbor_id"].nunique())
+
+        # 度數統計
+        degree_per_node = df.groupby("node_id")["degree"].first()
+        row["topk_expanded_degree_mean"] = float(degree_per_node.mean())
+
+        for p in (0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 100):
+            row[f"topk_expanded_degree_p{p}"] = float(degree_per_node.quantile(p / 100.0))
+
+    except Exception:
+        topk_rows.append(row)
+        return topk_rows, {}
+
+    # 計算覆蓋率
+    nodes_path = f"{base_prefix}_topk{topk}_nodes.txt"
+    if os.path.isfile(nodes_path):
+        row["topk_nodes_path"] = nodes_path
+    if os.path.isfile(nodes_path) and counts_map and total_count > 0:
         try:
-            df = pd.read_csv(neighbors_path)
-            if df.empty:
-                topk_rows.append(row)
-                continue
-            
-            required_cols = {"node_id", "neighbor_id", "degree"}
-            if not required_cols.issubset(df.columns):
-                topk_rows.append(row)
-                continue
-            
-            # 基本統計
-            row["topk_neighbor_edges"] = int(len(df))
-            row["topk_unique_nodes"] = int(df["node_id"].nunique())
-            row["topk_unique_neighbors"] = int(df["neighbor_id"].nunique())
-            
-            # 度數統計
-            degree_per_node = df.groupby("node_id")["degree"].first()
-            row["topk_degree_mean"] = float(degree_per_node.mean())
-            row["topk_degree_min"] = float(degree_per_node.min())
-            row["topk_degree_max"] = float(degree_per_node.max())
-            
-            for p in (0, 1, 5, 10, 25, 50, 75, 90, 95, 99):
-                row[f"topk_degree_p{p}"] = float(degree_per_node.quantile(p / 100.0))
-            
+            with open(nodes_path, "r", encoding="utf-8") as f:
+                topk_total = sum(counts_map.get(line.strip(), 0.0) for line in f if line.strip())
+            row["topk_expanded_coverage_ratio"] = float(topk_total / total_count)
         except Exception:
             pass
-        
-        # 計算覆蓋率
-        nodes_path = nodes_map.get(topk, "")
-        row["topk_nodes_path"] = nodes_path
-        
-        if nodes_path and counts_map and total_count > 0:
-            try:
-                with open(nodes_path, "r", encoding="utf-8") as f:
-                    topk_total = sum(counts_map.get(line.strip(), 0.0) for line in f if line.strip())
-                row["topk_cover_ratio"] = float(topk_total / total_count)
-            except Exception:
-                pass
-        
-        topk_rows.append(row)
-    
-    summary = {
-        "topk_variants_count": len(topk_rows),
-        "topk_k_list": ",".join(str(r["topk_k"]) for r in topk_rows),
-        "topk_neighbors_files": ";".join(r["topk_neighbors_path"] for r in topk_rows),
-        "topk_nodes_files": ";".join(r.get("topk_nodes_path", "") for r in topk_rows if r.get("topk_nodes_path")),
-    }
-    return topk_rows, summary
+
+    topk_rows.append(row)
+    return topk_rows, {}
 
 
 def collect_summary_stats(search_dir, output_file=None, verbose=False):
@@ -407,14 +389,25 @@ def main():
         sys.exit(1)
 
     final_df = summary_df
+    ordered_cols = list(summary_df.columns)
     if topk_data:
         topk_df = pd.DataFrame(topk_data)
+        topk_extra_cols_base = [
+            "topk_k",
+            "topk_neighbors_path",
+            "topk_nodes_path",
+            "topk_expanded_neighbor_count",
+            "topk_expanded_unique_count",
+            "topk_expanded_unique_neighbors_count",
+            "topk_expanded_degree_mean",
+            "topk_cover_ratio",
+        ]
+        topk_extra_cols = [c for c in topk_extra_cols_base if c in topk_df.columns]
+        topk_extra_cols += [c for c in topk_df.columns if c.startswith("topk_expanded_degree_p")]
+        ordered_cols.extend([c for c in topk_extra_cols if c not in ordered_cols])
         # 按 run_prefix 和 summary_stats_path left join（一個 summary 對應多個 topk_k）
         final_df = summary_df.merge(
-            topk_df[["run_prefix", "summary_stats_path", "topk_k", "topk_neighbors_path",
-                     "topk_nodes_path", "topk_neighbor_edges", "topk_unique_nodes",
-                     "topk_unique_neighbors", "topk_degree_mean", "topk_degree_min", "topk_degree_max"] +
-                    [c for c in topk_df.columns if c.startswith("topk_degree_p")]],
+            topk_df[["run_prefix", "summary_stats_path"] + topk_extra_cols],
             on=["run_prefix", "summary_stats_path"],
             how="left"
         )
@@ -431,6 +424,21 @@ def main():
         "topk_nodes_path",
     ]
     final_df = final_df.drop(columns=[c for c in drop_cols if c in final_df.columns])
+    ordered_cols = [c for c in ordered_cols if c in final_df.columns and c not in drop_cols]
+    remaining_cols = [c for c in final_df.columns if c not in ordered_cols]
+    final_df = final_df[ordered_cols + remaining_cols]
+
+    # 移除 iostat 全為 0 或極小值的數值欄位
+    iostat_cols = [c for c in final_df.columns if c.startswith("iostat_")]
+    zero_iostat_cols = []
+    for col in iostat_cols:
+        if not pd.api.types.is_numeric_dtype(final_df[col]):
+            continue
+        series = pd.to_numeric(final_df[col], errors="coerce").fillna(0.0)
+        if series.abs().max() <= 1e-9:
+            zero_iostat_cols.append(col)
+    if zero_iostat_cols:
+        final_df = final_df.drop(columns=zero_iostat_cols)
 
     final_df.to_csv(output_file, index=False)
     print(f"✓ 完整彙總：{output_file} ({len(final_df)} 行, {len(final_df.columns)} 列)")

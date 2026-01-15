@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Count expanded node frequency then dump neighbors for Top-K nodes.
-# Supports single file or batch mode (directory).
+# Supports single file or batch mode (directory). One TOPK per run.
 
 set -euo pipefail
 
@@ -9,6 +9,7 @@ usage() {
 Usage:
   bash dump_topk_neighbors.sh <expanded_nodes_csv>    # Single file
   bash dump_topk_neighbors.sh <search_dir>             # Batch mode (all *_expanded_nodes.csv)
+  EXPERIMENT_TAG=tag bash dump_topk_neighbors.sh       # Batch mode (search_dir defaults to outputFiles/search/<tag>)
 
 Args:
   expanded_nodes_csv   Path to *_expanded_nodes.csv
@@ -26,14 +27,22 @@ USAGE
 }
 
 [[ ${1:-} == "-h" || ${1:-} == "--help" ]] && { usage; exit 0; }
-[[ $# -lt 1 ]] && { usage; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISKANN_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 APPS_DIR="${DISKANN_ROOT}/build/apps"
 DUMP_BIN="${APPS_DIR}/dump_disk_neighbors"
 
-INPUT_PATH="$1"
+if [[ $# -lt 1 ]]; then
+    if [[ -n "${EXPERIMENT_TAG:-}" ]]; then
+        INPUT_PATH="${SCRIPT_DIR}/outputFiles/search/${EXPERIMENT_TAG}"
+    else
+        usage
+        exit 1
+    fi
+else
+    INPUT_PATH="$1"
+fi
 TOPK="${TOPK:-10}"
 
 # Batch mode: if input is a directory, process all *_expanded_nodes.csv files
