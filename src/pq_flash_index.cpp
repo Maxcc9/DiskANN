@@ -1733,7 +1733,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     {
         // Accumulate rather than overwrite to preserve external recordings
         stats->n_hops += hops;
-        stats->expanded_nodes_count += static_cast<unsigned>(visited.size());
+        stats->expanded_nodes_count = static_cast<unsigned>(visited.size());
     }
 
     // re-sort by distance

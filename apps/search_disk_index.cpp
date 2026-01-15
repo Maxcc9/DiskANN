@@ -385,9 +385,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         else
         {
             per_query_csv << "query_id,L,beamwidth,thread_id,total_us,io_us,cpu_us,sort_us,reorder_cpu_us,"
-                          << "n_ios,n_4k,n_8k,n_12k,n_16k,read_size,n_cmps,n_cache_hits,n_hops,"
-                          << "expanded_nodes_count,recall_match_count,frontier_queue_depth_mean,frontier_queue_depths_max,frontier_queue_depths_min,"
-                          << "reorder_queue_depth_mean,reorder_queue_depths_max,reorder_queue_depths_min,"
+                          << "n_ios,n_4k,n_8k,n_12k,n_16k,read_size,n_cmp,n_cache_hit,n_hop,"
+                          << "visited_node_count,recall_match_count,frontier_queue_depth_mean,frontier_queue_depth_max,frontier_queue_depth_min,"
+                          << "reorder_queue_depth_mean,reorder_queue_depth_max,reorder_queue_depth_min,"
                           << "expanded_node_out_degree_mean,expanded_node_out_degree_max\n";
         }
     }
@@ -728,7 +728,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         metrics_coll.add("reorder_queue_depth_min", reorder_queue_depth_min_stats);
         metrics_coll.add("thread_util", thread_util_stats);
 
-        metrics_coll.add("expanded_node_count", expanded_node_count_stats);
+        metrics_coll.add("visited_node_count", expanded_node_count_stats);
         metrics_coll.add("expanded_node_out_degree", expanded_node_out_degree_stats);
         metrics_summary.push_back(metrics_coll);
 
