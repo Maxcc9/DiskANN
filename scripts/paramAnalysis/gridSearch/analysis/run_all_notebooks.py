@@ -88,8 +88,8 @@ def write_summary(report_dir: Path, analyze_dir: Path) -> None:
     tables = sorted((report_dir / "tables").glob("*.csv"))
     tables_dir = report_dir / "tables"
 
-    stats_csv = latest_file(analyze_dir, "collected_stats_*.csv")
-    topk_csv = latest_file(analyze_dir, "collected_topk_*.csv")
+    stats_csv = latest_file(analyze_dir, "collected_all_*.csv")
+    topk_csv = ""
 
     lines = []
     lines.append("# Analysis Summary\n")
@@ -124,8 +124,7 @@ def write_summary(report_dir: Path, analyze_dir: Path) -> None:
     lines.append("\n")
     
     lines.append("## Inputs\n")
-    lines.append(f"- collected_stats: `{stats_csv}`\n" if stats_csv else "- collected_stats: (not found)\n")
-    lines.append(f"- collected_topk: `{topk_csv}`\n" if topk_csv else "- collected_topk: (not found)\n")
+    lines.append(f"- collected_all: `{stats_csv}`\n" if stats_csv else "- collected_all: (not found)\n")
     lines.append("\n")
     lines.append("## QC\n")
     qc_summary = tables_dir / "qc_summary.csv"
@@ -235,10 +234,9 @@ def main() -> int:
     report_dir = (analyze_dir / report_prefix).resolve()
     collect_dir = (analyze_dir / collect_prefix).resolve()
 
-    stats_csv = latest_file(collect_dir, "collected_stats_*.csv")
-    topk_csv = latest_file(collect_dir, "collected_topk_*.csv")
-    if not stats_csv or not topk_csv:
-        print("ERROR: collected_stats/topk not found in:", collect_dir, file=sys.stderr)
+    stats_csv = latest_file(collect_dir, "collected_all_*.csv")
+    if not stats_csv:
+        print("ERROR: collected_all not found in:", collect_dir, file=sys.stderr)
         print("Hint: run `python collect.py` or set COLLECT_PREFIX to the correct folder.", file=sys.stderr)
         return 1
 
