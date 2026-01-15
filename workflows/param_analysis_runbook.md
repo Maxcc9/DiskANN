@@ -108,10 +108,11 @@ EXPERIMENT_TAG=sift01 bash search_batch.sh --search-csv ./inputFiles/search_conf
 ```
 
 啟用 iostat 與 expanded nodes：
+(IOSTAT_INTERVAL 建議整數)
 
 ```bash
 EXPERIMENT_TAG=siftsmall01 \
-ENABLE_IOSTAT=1 IOSTAT_INTERVAL=0.5 \
+ENABLE_IOSTAT=1 IOSTAT_INTERVAL=1 \
 ENABLE_EXPANDED_NODES=1 EXPANDED_NODES_LIMIT=0 \
 COOLDOWN_TEMP_C=60 COOLDOWN_CHECK_INTERVAL=15 TEMP_DEVICE=/dev/nvme1 \
 NVME_USE_SUDO=0 \
@@ -129,8 +130,8 @@ bash search_batch.sh --search-csv ./inputFiles/search_configs.csv --max-parallel
 # 轉出全部 expanded nodes 的鄰居
 EXPERIMENT_TAG=siftsmall01 bash dump_all_neighbors.sh
 
-# Top‑K 熱點節點的鄰居（從 expanded nodes 的頻次統計）
-EXPERIMENT_TAG=siftsmall01 TOPK=200 bash dump_topk_neighbors.sh outputFiles/search/siftsmall01
+# Top‑K 熱點節點的鄰居（從 expanded nodes 的頻次統計；每次 run 僅處理一個 TOPK）
+EXPERIMENT_TAG=siftsmall01 TOPK=200 bash dump_topk_neighbors.sh
 ```
 
 輸出：`outputFiles/search/siftsmall01/*_neighbors.csv`、`*_topk{K}_neighbors.csv`

@@ -71,12 +71,14 @@
 | ENV | EXTRA_ARGS | 否 | 空 | 追加給 `search_disk_index` 的參數 |
 | ENV | DRY_RUN | 否 | `0` | `1` 僅輸出指令不執行 |
 | ENV | ENABLE_IOSTAT | 否 | `0` | `1` 啟用每筆搜尋 iostat |
-| ENV | IOSTAT_INTERVAL | 否 | `1` | iostat 取樣秒數 |
+| ENV | IOSTAT_INTERVAL | 否 | `1` | iostat 取樣秒數（建議整數） |
 | ENV | IOSTAT_DEVICE | 否 | 空 | 指定裝置（如 `/dev/nvme0n1`） |
 | ENV | IOSTAT_DATA_PATH | 否 | 空 | 用檔案路徑推估裝置 |
 | ENV | ENABLE_EXPANDED_NODES | 否 | `0` | `1` 會為每筆樣本輸出 expanded nodes CSV |
 | ENV | EXPANDED_NODES_LIMIT | 否 | `0` | 每個 query 最多記錄展開節點數（0 = unlimited） |
 | ENV | K_OVERRIDE | 否 | 空 | 覆寫 CSV 的 `search_K` |
+| ENV | ENABLE_SUMMARY_STATS | 否 | `1` | `0` 不輸出 summary stats |
+| ENV | ENABLE_PER_QUERY_STATS | 否 | `0` | `1` 輸出 per-query stats |
 
 ## 5) collect.py
 
@@ -122,31 +124,16 @@
 
 | 參數類型 | 名稱 | 必填 | 預設 | 說明 |
 |---|---|---|---|---|
-| CLI | expanded_nodes_csv | 是 |  | `*_expanded_nodes.csv` 路徑 |
+| CLI | expanded_nodes_csv | 否 |  | `*_expanded_nodes.csv` 路徑（未提供則用 `EXPERIMENT_TAG`） |
 | ENV | TOPK | 否 | `10` | Top‑K node 數量 |
 | ENV | OUTPUT_DIR | 否 | same as input | 輸出資料夾 |
 | ENV | BUILD_DIR | 否 | `./outputFiles/build` | 索引輸入資料夾 |
-| ENV | EXPERIMENT_TAG | 否 | 空 | 追加到預設 BUILD_DIR |
+| ENV | EXPERIMENT_TAG | 否 | 空 | 若未提供 CLI 路徑，會用 `outputFiles/search/<tag>` |
 | ENV | DATA_TYPE | 否 | `float` | `dump_disk_neighbors --data_type` |
 | ENV | DIST_FN | 否 | `l2` | `dump_disk_neighbors --dist_fn` |
 | ENV | DRY_RUN | 否 | `0` | `1` 僅輸出指令不執行 |
 
-## 9) dump_all_topk_neighbors.sh
-
-用途：批次對所有 expanded nodes 檔案做 Top‑K 鄰居輸出。
-
-| 參數類型 | 名稱 | 必填 | 預設 | 說明 |
-|---|---|---|---|---|
-| CLI | search_dir | 否 | `./outputFiles/search` | 搜尋輸出目錄 |
-| ENV | TOPK | 否 | `10` | Top‑K node 數量 |
-| ENV | OUTPUT_DIR | 否 | 空 | 若設定，所有輸出集中到此資料夾 |
-| ENV | BUILD_DIR | 否 | `./outputFiles/build` | 索引輸入資料夾 |
-| ENV | EXPERIMENT_TAG | 否 | 空 | 追加到預設 SEARCH_DIR/BUILD_DIR |
-| ENV | DATA_TYPE | 否 | `float` | `dump_disk_neighbors --data_type` |
-| ENV | DIST_FN | 否 | `l2` | `dump_disk_neighbors --dist_fn` |
-| ENV | DRY_RUN | 否 | `0` | `1` 僅輸出指令不執行 |
-
-## 10) measure_queue_depth.sh
+## 9) measure_queue_depth.sh
 
 用途：包住任意命令並記錄 iostat。
 
@@ -158,9 +145,9 @@
 | ENV | DEVICE | 否 | 空 | 指定裝置（如 `/dev/nvme0n1`） |
 | ENV | DATA_PATH | 否 | 空 | 用檔案路徑推估裝置 |
 
-## 11) analysis/run_all_notebooks.py
+## 10) analysis/run_all_notebooks.py
 
-用途：執行 00~06 notebooks 並產生 `summary.md`。
+用途：執行 00~06 notebooks 並產生 `summary.md`（讀取 `collected_all_*.csv`）。
 
 | 參數類型 | 名稱 | 必填 | 預設 | 說明 |
 |---|---|---|---|---|

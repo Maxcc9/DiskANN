@@ -20,8 +20,7 @@ Strict execution order
 ## 1) Inputs
 
 ### 1.1 Required
-- `outputFiles/analyze/{search_dir}/collected_stats_{search_dir}_{timestamp}.csv`
-- `outputFiles/analyze/{search_dir}/collected_topk_{search_dir}_{timestamp}.csv`
+- `outputFiles/analyze/{search_dir}/collected_all_{search_dir}_{timestamp}.csv`
 
 ### 1.2 Optional (only if present)
 - `outputFiles/search/*/*_expanded_nodes.csv`
@@ -47,7 +46,7 @@ All analyses must reference these values, not inline literals.
 
 ### 3.1 Key Integrity
 
-For both CSVs:
+For the collected CSV:
 - Primary key: `run_prefix`
 - Enforce:
   - `run_prefix` uniqueness

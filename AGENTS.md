@@ -9,9 +9,9 @@
 - `scripts/paramAnalysis/gridSearch/` grid-search tooling for build/search batches and offline analysis.
 - Output naming: search artifacts use prefix `S{search_id}_{index_tag}_W{W}_L{L}_K{K}_cache{cache}_T{threads}`.
 - Top-K analysis outputs: `*_topk{K}_nodes.txt`, `*_topk{K}_neighbors.csv`.
-- Aggregation outputs: `outputFiles/analyze/collected_stats_{search_dir}_{timestamp}.csv` and `outputFiles/analyze/collected_topk_{search_dir}_{timestamp}.csv`.
+- Aggregation outputs: `outputFiles/analyze/collected_all_{search_dir}_{timestamp}.csv`.
 - Analysis reports: `outputFiles/analyze/<REPORT_PREFIX>/figures/`, `outputFiles/analyze/<REPORT_PREFIX>/tables/`, `outputFiles/analyze/<REPORT_PREFIX>/summary.md`.
-- Notebook helper: `scripts/paramAnalysis/gridSearch/analysis.ipynb`.
+- Notebook helper: `scripts/paramAnalysis/gridSearch/analysis/run_all_notebooks.py` (runs 00~06 notebooks).
 - Batch tooling supports `EXPERIMENT_TAG` to create per-run subfolders under `outputFiles/build` and `outputFiles/search`.
 - `build_batch.sh` and `search_batch.sh` require named args (`--build-csv`, `--search-csv`, `--dataset`, `--max-parallel`).
 - `rust/` Rust crates; follow Cargo workflows.
@@ -38,6 +38,7 @@
 - Rust tests live in each crate; keep `rust/cmd_drivers/` examples current.
 - Update `workflows/*.md` when adding scenarios; stash catalogs in `test_run/`.
 - For param analysis updates, keep `workflows/param_analysis_gridsearch.md` in sync.
+- For param analysis outputs, `collect.py` writes a single `collected_all_*` file; notebooks read that.
 
 ## Commit & Pull Request Guidelines
 - Commit format: `Type: short imperative summary (#issue)` (e.g., `Fix: clamp PQ chunk count (#654)`).
