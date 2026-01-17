@@ -135,16 +135,22 @@ def parse_iostat_log(iostat_log):
         "iostat_device_multi": int(len(devices) > 1),
         "iostat_device_list": ",".join(devices),
     }
-    # 對所選裝置的每個欄位，計算 mean / max p0 p
+    # 對所選裝置的每個欄位，計算 mean / gmean / var / std / iqr / cv / percentiles
     for col in sorted(columns):
         vals = [r[col] for r in rows if r.get(col) is not None]
         if not vals:
             continue
-        stats[f"iostat_{col}_mean"] = float(sum(vals) / len(vals))
-        stats[f"iostat_{col}_gmean"] = float(np.exp(np.mean(np.log(np.array(vals) + 1e-10))))  # 幾何平均數
+        vals_arr = np.array(vals, dtype=float)
+        stats[f"iostat_{col}_mean"] = float(np.mean(vals_arr))
+        stats[f"iostat_{col}_gmean"] = float(np.exp(np.mean(np.log(vals_arr + 1e-10))))  # 幾何平均數
+        stats[f"iostat_{col}_var"] = float(np.var(vals_arr))
+        stats[f"iostat_{col}_std"] = float(np.std(vals_arr))
+        stats[f"iostat_{col}_iqr"] = float(np.quantile(vals_arr, 0.75) - np.quantile(vals_arr, 0.25))
+        mean_val = stats[f"iostat_{col}_mean"]
+        stats[f"iostat_{col}_cv"] = float(stats[f"iostat_{col}_std"] / abs(mean_val)) if mean_val != 0 else 0.0
         percentiles = (0.0, 0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 0.999, 1.0)
         for p in percentiles:
-            q = float(np.quantile(vals, p))
+            q = float(np.quantile(vals_arr, p))
             key = "p999" if p == 0.999 else f"p{int(p * 100)}"
             stats[f"iostat_{col}_{key}"] = q
     return stats
@@ -428,17 +434,31 @@ def main():
     remaining_cols = [c for c in final_df.columns if c not in ordered_cols]
     final_df = final_df[ordered_cols + remaining_cols]
 
-    # 移除 iostat 全為 0 或極小值的數值欄位
+    # 僅在同一 iostat 欄位族群全為 0 時才移除
     iostat_cols = [c for c in final_df.columns if c.startswith("iostat_")]
-    zero_iostat_cols = []
+    iostat_groups = {}
     for col in iostat_cols:
         if not pd.api.types.is_numeric_dtype(final_df[col]):
             continue
-        series = pd.to_numeric(final_df[col], errors="coerce").fillna(0.0)
-        if series.abs().max() <= 1e-9:
-            zero_iostat_cols.append(col)
-    if zero_iostat_cols:
-        final_df = final_df.drop(columns=zero_iostat_cols)
+        parts = col.split("_", 2)
+        if len(parts) < 3:
+            continue
+        base = parts[1]
+        iostat_groups.setdefault(base, []).append(col)
+
+    drop_iostat_cols = []
+    for base, cols in iostat_groups.items():
+        all_zero = True
+        for col in cols:
+            series = pd.to_numeric(final_df[col], errors="coerce").fillna(0.0)
+            if series.abs().max() > 1e-9:
+                all_zero = False
+                break
+        if all_zero:
+            drop_iostat_cols.extend(cols)
+
+    if drop_iostat_cols:
+        final_df = final_df.drop(columns=drop_iostat_cols)
 
     final_df.to_csv(output_file, index=False)
     print(f"✓ 完整彙總：{output_file} ({len(final_df)} 行, {len(final_df.columns)} 列)")
