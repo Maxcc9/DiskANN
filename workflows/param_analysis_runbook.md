@@ -1,45 +1,57 @@
-# 參數分析完整流程
+# Grid Search 參數建置與搜尋流程
 
-> 從產生參數到分析輸出的一條龍流程，確保每次實驗都有獨立的輸出資料夾（建議設定 `EXPERIMENT_TAG`）。
+從產生參數到批次搜尋並輸出統合 csv 檔的流程，確保每次實驗都有獨立的輸出資料夾（建議設定 `EXPERIMENT_TAG`）。後續可透過輸出的 collect_all_xxx.csv 進行完整分析。
+
+## 重要：EXPERIMENT_TAG 機制
+
+`EXPERIMENT_TAG` 環境變數用於：
+  1. **配置文件隔離**：`gen_build_configs.py` 和 `gen_search_configs.py` 在 `inputFiles/{EXPERIMENT_TAG}/` 下產生各自的 CSV
+  2. **輸出資料夾隔離**：`build_batch.sh` 和 `search_batch.sh` 將結果輸出至 `outputFiles/{build|search}/{EXPERIMENT_TAG}/`
+  3. **批次腳本自動配對**：若設定 `EXPERIMENT_TAG`，批次腳本會自動從對應的 `inputFiles/{EXPERIMENT_TAG}/` 讀取配置，無需額外指定 `--build-csv` 或 `--search-csv`（但仍可覆寫）
+  4. **DATASET 自動推斷**：若未明確設定 `--dataset`，批次腳本會使用 `EXPERIMENT_TAG` 值作為 DATASET（用於推斷資料集路徑）
+  5. **TEMP_DEVICE 自動檢測**：在啟用降溫控制（`COOLDOWN_TEMP_C`）時，會自動檢測當前資料夾所在的 NVMe 設備，無需手動指定
 
 ## A. 前置準備：建置與 siftsmall 範例
 
 ```bash
+# 安裝必要套件
 sudo apt install make cmake g++ libaio-dev libgoogle-perftools-dev clang-format libboost-all-dev libmkl-full-dev
 
+# 設定專案根目錄
 export DISKANN_ROOT="$(pwd)"
 
+# 建置專案
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target all -- -j4
 
-# 下載 siftsmall
+# 下載 siftsmall 資料集
 mkdir -p data/siftsmall && cd data/siftsmall
 wget ftp://ftp.irisa.fr/local/texmex/corpus/siftsmall.tar.gz
 tar xzf siftsmall.tar.gz
 
-# 下載 sift1M
+# 下載 sift1M 資料集
 mkdir -p data/sift && cd data/sift
 wget ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz
 tar xzf sift.tar.gz
 
-# 將資料集轉檔
+# 回根目錄
 cd "$DISKANN_ROOT"
 
-# siftsmall
+# siftsmall 轉檔
 build/apps/utils/fvecs_to_bin float data/siftsmall/siftsmall/siftsmall_base.fvecs data/siftsmall/siftsmall_base.bin
 
 build/apps/utils/fvecs_to_bin float data/siftsmall/siftsmall/siftsmall_query.fvecs data/siftsmall/siftsmall_query.bin
 
 build/apps/utils/ivecs_to_bin data/siftsmall/siftsmall/siftsmall_groundtruth.ivecs data/siftsmall/siftsmall_groundtruth.bin
 
-# sift
+# sift 轉檔
 build/apps/utils/fvecs_to_bin float data/sift/sift/sift_base.fvecs data/sift/sift_base.bin
 
 build/apps/utils/fvecs_to_bin float data/sift/sift/sift_query.fvecs data/sift/sift_query.bin
 
 build/apps/utils/ivecs_to_bin data/sift/sift/sift_groundtruth.ivecs data/sift/sift_groundtruth.bin
 
-# 若沒有 ground truth，可用此方式產生
+# 若資料集沒有 ground truth，可用此方式產生
 build/apps/utils/compute_groundtruth \
   --data_type float --dist_fn l2 \
   --base_file data/siftsmall/siftsmall_base.bin \
@@ -67,56 +79,82 @@ cd "$DISKANN_ROOT/scripts/paramAnalysis/gridSearch"
 
 ### 1) 產生 build 參數
 
-用途：建立建置索引的參數組合（R/L 等），供批次建置使用。
+用途：建立建置索引的參數組合（R/L 等），供批次建置使用。依 `EXPERIMENT_TAG` 分隔配置檔案。
 
 ```bash
-python gen_build_configs.py
+EXPERIMENT_TAG=siftsmall01 python gen_build_configs.py
+
+EXPERIMENT_TAG=sift01 python gen_build_configs.py
 ```
 
-輸出：`inputFiles/build_configs.csv`
+輸出：`inputFiles/{EXPERIMENT_TAG}/build_configs.csv`
 
 ### 2) 批次建置 index
 
-用途：依 `build_configs.csv` 批次建置索引，輸出到獨立實驗資料夾。
+用途：依 `inputFiles/{EXPERIMENT_TAG}/build_configs.csv` 批次建置索引，輸出到獨立實驗資料夾。設定 `EXPERIMENT_TAG` 即自動配對配置檔案與推斷 DATASET。
 
 ```bash
-EXPERIMENT_TAG=siftsmall01 NUM_THREADS=$(nproc) bash build_batch.sh --build-csv ./inputFiles/build_configs.csv
+EXPERIMENT_TAG=siftsmall01 NUM_THREADS=$(nproc) bash build_batch.sh --clean
 
-EXPERIMENT_TAG=sift01 NUM_THREADS=$(nproc) bash build_batch.sh --build-csv ./inputFiles/build_configs.csv --dataset sift
+EXPERIMENT_TAG=sift01 NUM_THREADS=$(nproc) bash build_batch.sh --clean
+```
+
+若需覆寫 DATASET（使用不同的資料集名稱）：
+
+```bash
+EXPERIMENT_TAG=sift01_test NUM_THREADS=$(nproc) bash build_batch.sh --dataset sift --clean
 ```
 
 輸出：`outputFiles/build/siftsmall01/`
 
 ### 3) 產生 search 參數
 
-用途：建立搜尋參數組合（W/L/K/cache/threads）。
+用途：建立搜尋參數組合（W/L/K/cache/threads）。依 `EXPERIMENT_TAG` 分隔配置檔案。
 
 ```bash
-python gen_search_configs.py --dataset_size 10000 --max_cores $(nproc)
+EXPERIMENT_TAG=siftsmall01 python gen_search_configs.py --dataset_size 10000 --max_cores $(nproc)
+
+EXPERIMENT_TAG=sift01 python gen_search_configs.py --dataset_size 1000000 --max_cores $(nproc)
 ```
 
-輸出：`inputFiles/search_configs.csv`
+輸出：`inputFiles/{EXPERIMENT_TAG}/search_configs.csv`
 
 ### 4) 批次搜尋
 
-用途：依 `search_configs.csv` 對所有 index 進行搜尋，產生 summary / expanded nodes / iostat 等原始結果。
+用途：依 `inputFiles/{EXPERIMENT_TAG}/search_configs.csv` 對所有 index 進行搜尋，產生 summary / expanded nodes / iostat 等原始結果。設定 `EXPERIMENT_TAG` 即自動配對配置檔案與推斷 DATASET。
 
 ```bash
-EXPERIMENT_TAG=siftsmall01 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv
+EXPERIMENT_TAG=siftsmall01 bash search_batch.sh --clean
 
-EXPERIMENT_TAG=sift01 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv --dataset sift
+EXPERIMENT_TAG=sift01 bash search_batch.sh --clean
 ```
 
-啟用 iostat 與 expanded nodes：
-(IOSTAT_INTERVAL 建議整數)
+若需覆寫 DATASET：
+
+```bash
+EXPERIMENT_TAG=sift01_test bash search_batch.sh --dataset sift --clean
+```
+
+啟用 iostat 與 expanded nodes（設定 `EXPERIMENT_TAG` 自動配對配置及推斷設備）：
 
 ```bash
 EXPERIMENT_TAG=siftsmall01 \
 ENABLE_IOSTAT=1 IOSTAT_INTERVAL=1 \
 ENABLE_EXPANDED_NODES=1 EXPANDED_NODES_LIMIT=0 \
-COOLDOWN_TEMP_C=60 COOLDOWN_CHECK_INTERVAL=15 TEMP_DEVICE=/dev/nvme1 \
+COOLDOWN_TEMP_C=60 COOLDOWN_CHECK_INTERVAL=15 \
 NVME_USE_SUDO=0 \
-bash search_batch.sh --search-csv ./inputFiles/search_configs.csv --max-parallel 1
+bash search_batch.sh --max-parallel 1 --clean
+```
+
+或手動指定設備（覆寫自動推斷）：
+
+```bash
+EXPERIMENT_TAG=siftsmall01 \
+ENABLE_IOSTAT=1 IOSTAT_INTERVAL=1 \
+ENABLE_EXPANDED_NODES=1 EXPANDED_NODES_LIMIT=0 \
+COOLDOWN_TEMP_C=60 COOLDOWN_CHECK_INTERVAL=15 \ TEMP_DEVICE=/dev/nvme1 \
+NVME_USE_SUDO=0 \
+bash search_batch.sh --max-parallel 1 --clean
 ```
 
 輸出：`outputFiles/search/siftsmall01/`
@@ -171,24 +209,73 @@ REPORT_PREFIX=siftsmall01 ./run_all_notebooks.py
 - `FILTER_SEARCH_K`：分析階段只保留指定 K（預設 `10`）
 - `ENABLE_SUMMARY_STATS`：是否輸出 summary stats（`1`/`0`，預設 `1`）
 - `ENABLE_PER_QUERY_STATS`：是否輸出 per-query stats（`1`/`0`，預設 `0`）
-- `PLOT_MAX_POINTS`：圖表下採樣上限
-- `PLOT_LOG_LATENCY`：延遲圖使用 log 軸（`1`/`0`）
-- `QC_RECALL_THRESHOLD` / `QC_RECALL_PCTL`：QC 低召回門檻（固定/分位數）
-- `QC_OUTLIER_Z`：QC robust z 門檻
-- `SHAP_MAX_SAMPLES`：SHAP 抽樣上限
-- `MODEL_TEST_SIZE` / `MODEL_RANDOM_STATE`：surrogate 模型切分與隨機種子
-- `WORSTCASE_PCTL` / `WORSTCASE_MIN_COUNT`：worstcase 定義與分組下限
-- `BOTTLENECK_SHARE_THRESHOLD`：瓶頸分類門檻
 
 ## E. 範例：重跑新實驗
 
 ```bash
-EXPERIMENT_TAG=exp02 bash build_batch.sh --build-csv ./inputFiles/build_configs.csv
+EXPERIMENT_TAG=sift02 python gen_build_configs.py
+EXPERIMENT_TAG=sift02 bash build_batch.sh --dataset sift --clean
 
-EXPERIMENT_TAG=exp02 bash search_batch.sh --search-csv ./inputFiles/search_configs.csv
+EXPERIMENT_TAG=sift02 python gen_search_configs.py --dataset_size 1000000 --max_cores $(nproc)
+EXPERIMENT_TAG=sift02 \
+ENABLE_IOSTAT=1 IOSTAT_INTERVAL=1 \
+ENABLE_EXPANDED_NODES=1 EXPANDED_NODES_LIMIT=0 \
+COOLDOWN_TEMP_C=60 COOLDOWN_CHECK_INTERVAL=15 \
+NVME_USE_SUDO=0 \
+bash search_batch.sh --max-parallel 1 --clean
 
-EXPERIMENT_TAG=exp02 python collect.py
+EXPERIMENT_TAG=sift02 TOPK=100000 bash dump_topk_neighbors.sh
+EXPERIMENT_TAG=sift02 python collect.py
+
 cd "$DISKANN_ROOT/scripts/paramAnalysis/gridSearch/analysis"
+REPORT_PREFIX=sift02 ./run_all_notebooks.py
+```
+## F. 常見問題與最佳實踐
 
-REPORT_PREFIX=exp02 ./run_all_notebooks.py
+### Q: build_batch.sh 與 search_batch.sh 的 DATASET 是否一定要指定？
+
+A: 不一定。若設定 `EXPERIMENT_TAG`，批次腳本會自動以 `EXPERIMENT_TAG` 值作為 DATASET，用於推斷資料集路徑（如 `data/{EXPERIMENT_TAG}/{EXPERIMENT_TAG}_base.bin`）。
+- 若 `EXPERIMENT_TAG=sift01`，會自動搜尋 `data/sift01/sift01_base.bin`
+- 若實際資料集名稱不同，才需指定 `--dataset sift` 來覆寫
+
+### Q: TEMP_DEVICE 要怎樣指定？
+
+A: 自動推斷優先順序：
+1. 環境變數 `TEMP_DEVICE`（若非預設值 `/dev/nvme0`）
+2. 從當前 `OUTPUT_DIR` 所在的 NVMe 設備自動檢測
+3. 回退到預設 `/dev/nvme0`
+
+在啟用降溫控制（`COOLDOWN_TEMP_C`）時，自動推斷功能會啟動。若環境中只有一個 NVMe，通常無需手動指定。
+
+### Q: 如何在不設定 EXPERIMENT_TAG 的情況下運行？
+
+A: 不設定 `EXPERIMENT_TAG` 時，配置文件將使用預設位置：
+- Build 配置：`inputFiles/build_configs.csv`
+- Search 配置：`inputFiles/search_configs.csv`
+- Build 輸出：`outputFiles/build/`
+- Search 輸出：`outputFiles/search/`
+
+但**強烈建議總是設定 `EXPERIMENT_TAG`**，避免不同實驗混淆。
+
+### Q: 重複使用相同 EXPERIMENT_TAG 會發生什麼？
+
+A: **預設情況下會混合舊數據**。若重複運行：
+```bash
+EXPERIMENT_TAG=sift01 bash build_batch.sh
+EXPERIMENT_TAG=sift01 bash build_batch.sh  # ← 新索引與舊索引混在一起
+```
+
+**解決方案**：使用 `--clean` 參數清除舊數據：
+```bash
+# 方式 1：命令行參數
+EXPERIMENT_TAG=sift01 bash build_batch.sh --clean
+EXPERIMENT_TAG=sift01 bash search_batch.sh --clean
+
+# 方式 2：環境變數
+EXPERIMENT_TAG=sift01 CLEAN=1 bash build_batch.sh
+EXPERIMENT_TAG=sift01 CLEAN=1 bash search_batch.sh
+
+# 方式 3：手動清除
+rm -rf ./outputFiles/build/sift01
+rm -rf ./outputFiles/search/sift01
 ```
