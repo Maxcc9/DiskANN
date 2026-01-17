@@ -406,7 +406,7 @@ def main():
             "topk_expanded_unique_count",
             "topk_expanded_unique_neighbors_count",
             "topk_expanded_degree_mean",
-            "topk_cover_ratio",
+            "topk_expanded_coverage_ratio",
         ]
         topk_extra_cols = [c for c in topk_extra_cols_base if c in topk_df.columns]
         topk_extra_cols += [c for c in topk_df.columns if c.startswith("topk_expanded_degree_p")]
