@@ -9,12 +9,13 @@ set -euo pipefail
 usage() {
     cat <<'USAGE'
 用法:
-  bash build_batch.sh [--build-csv PATH] [--dataset NAME] [--max-parallel N]
+  bash build_batch.sh [--build-csv PATH] [--dataset NAME] [--max-parallel N] [--clean]
 
 參數:
   --build-csv PATH
   --dataset NAME
   --max-parallel N
+  --clean          清除舊的實驗搜尋結果（重新開始），預設不清除
 
 環境變數可覆寫:
   DATA_FILE, OUTPUT_DIR, DIST_FN, DATA_TYPE
@@ -22,6 +23,7 @@ usage() {
   BUILD_B, BUILD_M, PQ_DISK_BYTES, BUILD_PQ_BYTES, NUM_THREADS
   APPEND_PARAMS=1 時使用 -A 自動附加參數到檔名前綴
   EXTRA_ARGS 可補充 build_disk_index 的其他參數
+  CLEAN=1 時清除舊的實驗搜尋結果（同 --clean）
   DRY_RUN=1 時僅印出指令不執行 build_disk_index
 USAGE
 }
@@ -33,9 +35,18 @@ DISKANN_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 APPS_DIR="${DISKANN_ROOT}/build/apps"
 BUILD_BIN="${APPS_DIR}/build_disk_index"
 
-BUILD_CSV="${SCRIPT_DIR}/inputFiles/build_configs.csv"
-DATASET="siftsmall"
+# 初始化預設值（若設定 EXPERIMENT_TAG，則嘗試從對應資料夾自動讀取）
+EXPERIMENT_TAG="${EXPERIMENT_TAG:-}"
+if [[ -n "$EXPERIMENT_TAG" ]]; then
+    BUILD_CSV="${SCRIPT_DIR}/inputFiles/${EXPERIMENT_TAG}/build_configs.csv"
+else
+    BUILD_CSV="${SCRIPT_DIR}/inputFiles/build_configs.csv"
+fi
+
+# 初始化 DATASET（在命令行参数前）
+DATASET="${DATASET:-}"
 MAX_PARALLEL="1"
+CLEAN="${CLEAN:-0}"
 
 # Optional named args
 while [[ $# -gt 0 ]]; do
@@ -52,6 +63,10 @@ while [[ $# -gt 0 ]]; do
             MAX_PARALLEL="$2"
             shift 2
             ;;
+        --clean)
+            CLEAN="1"
+            shift
+            ;;
         --)
             shift
             break
@@ -61,11 +76,20 @@ while [[ $# -gt 0 ]]; do
             exit 1
             ;;
         *)
-            echo "ERROR: 不支援位置參數，請使用 --build-csv/--dataset/--max-parallel" >&2
+            echo "ERROR: 不支援位置參數，請使用 --build-csv/--dataset/--max-parallel/--clean" >&2
             exit 1
             ;;
     esac
 done
+
+# 自動推斷 DATASET（命令行參數解析後）：優先順序為 --dataset 參數 > EXPERIMENT_TAG > 預設值
+if [[ -z "$DATASET" ]]; then
+    if [[ -n "$EXPERIMENT_TAG" ]]; then
+        DATASET="$EXPERIMENT_TAG"
+    else
+        DATASET="siftsmall"
+    fi
+fi
 DRY_RUN="${DRY_RUN:-0}"
 DATA_TYPE="${DATA_TYPE:-float}"
 DIST_FN="${DIST_FN:-l2}"
@@ -97,6 +121,15 @@ if [[ -n "$EXPERIMENT_TAG" ]]; then
     OUTPUT_DIR="${OUTPUT_DIR}/${EXPERIMENT_TAG}"
 fi
 DATA_FILE="${DATA_FILE:-${DISKANN_ROOT}/data/${DATASET}/${DATASET}_base.bin}"
+
+# 清除舊數據（若 CLEAN=1）
+if [[ "$CLEAN" == "1" ]]; then
+    if [[ -d "$OUTPUT_DIR" ]]; then
+        echo "清除舊的實驗輸出: $OUTPUT_DIR"
+        rm -rf "$OUTPUT_DIR"
+    fi
+fi
+
 mkdir -p "$OUTPUT_DIR"
 
 if [[ "$DRY_RUN" != "1" ]]; then

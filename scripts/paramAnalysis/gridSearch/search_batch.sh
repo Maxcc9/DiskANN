@@ -9,12 +9,13 @@ set -euo pipefail
 usage() {
     cat <<'USAGE'
 用法:
-  bash search_batch.sh [--search-csv PATH] [--dataset NAME] [--max-parallel N]
+  bash search_batch.sh [--search-csv PATH] [--dataset NAME] [--max-parallel N] [--clean]
 
 參數:
   --search-csv PATH
   --dataset NAME
   --max-parallel N
+  --clean          清除舊的實驗搜尋結果（重新開始），預設不清除
 
 環境變數可覆寫:
   BUILD_DIR, OUTPUT_DIR, DATA_TYPE, DIST_FN
@@ -30,6 +31,7 @@ usage() {
   COOLDOWN_CHECK_INTERVAL=15 檢查間隔秒數
   TEMP_DEVICE=/dev/nvme0 供溫度檢查使用
   NVME_USE_SUDO=0 設為 1 時以 sudo 讀取 nvme smart-log（若無法直接讀取）
+  CLEAN=1 時清除舊的實驗搜尋結果（同 --clean）
   DRY_RUN=1 時僅印出指令不執行 search_disk_index
 USAGE
 }
@@ -41,9 +43,18 @@ DISKANN_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 APPS_DIR="${DISKANN_ROOT}/build/apps"
 SEARCH_BIN="${APPS_DIR}/search_disk_index"
 
-SEARCH_CSV="${SCRIPT_DIR}/inputFiles/search_configs.csv"
-DATASET=""
+# 初始化預設值（若設定 EXPERIMENT_TAG，則嘗試從對應資料夾自動讀取）
+EXPERIMENT_TAG="${EXPERIMENT_TAG:-}"
+if [[ -n "$EXPERIMENT_TAG" ]]; then
+    SEARCH_CSV="${SCRIPT_DIR}/inputFiles/${EXPERIMENT_TAG}/search_configs.csv"
+else
+    SEARCH_CSV="${SCRIPT_DIR}/inputFiles/search_configs.csv"
+fi
+
+# 初始化 DATASET（在命令行参数前）
+DATASET="${DATASET:-}"
 MAX_PARALLEL="4"
+CLEAN="${CLEAN:-0}"
 
 # Optional named args
 while [[ $# -gt 0 ]]; do
@@ -60,6 +71,10 @@ while [[ $# -gt 0 ]]; do
             MAX_PARALLEL="$2"
             shift 2
             ;;
+        --clean)
+            CLEAN="1"
+            shift
+            ;;
         --)
             shift
             break
@@ -69,11 +84,16 @@ while [[ $# -gt 0 ]]; do
             exit 1
             ;;
         *)
-            echo "ERROR: 不支援位置參數，請使用 --search-csv/--dataset/--max-parallel" >&2
+            echo "ERROR: 不支援位置參數，請使用 --search-csv/--dataset/--max-parallel/--clean" >&2
             exit 1
             ;;
     esac
 done
+
+# 自動推斷 DATASET（命令行參數解析後）：優先順序為 --dataset 參數 > EXPERIMENT_TAG > 預設為空
+if [[ -z "$DATASET" ]]; then
+    DATASET="${EXPERIMENT_TAG:-}"
+fi
 DRY_RUN="${DRY_RUN:-0}"
 DATA_TYPE="${DATA_TYPE:-float}"
 DIST_FN="${DIST_FN:-l2}"
@@ -118,9 +138,37 @@ if [[ ! "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [[ "$MAX_PARALLEL" -lt 1 ]]; then
     echo "ERROR: MAX_PARALLEL 需為正整數" >&2
     exit 1
 fi
+
+# ==================== 函數定義 ====================
+
+strip_ws() { echo "$1" | tr -d '[:space:]'; }
+
+resolve_temp_device() {
+    # 優先順序：環境變數 TEMP_DEVICE（非預設值）> 當前目錄的設備 > 預設 /dev/nvme0
+    local default_temp_device="/dev/nvme0"
+    if [[ -n "$TEMP_DEVICE" && "$TEMP_DEVICE" != "$default_temp_device" ]]; then
+        echo "$TEMP_DEVICE"
+        return 0
+    fi
+    # 嘗試從 OUTPUT_DIR 推斷設備
+    local output_dir="${OUTPUT_DIR:-${SCRIPT_DIR}/outputFiles/search}"
+    if [[ -e "$output_dir" ]]; then
+        local detected_device=$(df -P "$output_dir" 2>/dev/null | awk 'NR==2 {print $1}')
+        if [[ -n "$detected_device" && "$detected_device" =~ nvme ]]; then
+            echo "$detected_device"
+            return 0
+        fi
+    fi
+    echo "$default_temp_device"
+}
+
+# ==================== 主程序邏輯 ====================
+
 if [[ -n "$COOLDOWN_TEMP_C" ]]; then
     if [[ "$COOLDOWN_TEMP_C" =~ ^[0-9]+$ ]]; then
         COOLDOWN_ENABLED=1
+        # 在啟用降溫控制時自動推斷 TEMP_DEVICE
+        TEMP_DEVICE=$(resolve_temp_device)
     else
         echo "WARN: COOLDOWN_TEMP_C=$COOLDOWN_TEMP_C 不是整數，忽略降溫控制" >&2
         COOLDOWN_TEMP_C=""
@@ -137,6 +185,14 @@ fi
 if [[ ! -d "$BUILD_DIR" ]]; then
     echo "ERROR: 找不到 BUILD_DIR 目錄: $BUILD_DIR" >&2
     exit 1
+fi
+
+# 清除舊數據（若 CLEAN=1）
+if [[ "$CLEAN" == "1" ]]; then
+    if [[ -d "$OUTPUT_DIR" ]]; then
+        echo "清除舊的搜尋結果: $OUTPUT_DIR"
+        rm -rf "$OUTPUT_DIR"
+    fi
 fi
 
 mkdir -p "$OUTPUT_DIR"
@@ -427,7 +483,8 @@ for index_file in "${index_files[@]}"; do
         dataset_name="${BASH_REMATCH[1]}"
     fi
 
-    if [[ -n "$DATASET" ]]; then
+    # 只有當無法從索引文件名提取 dataset_name 時，才使用 DATASET 環境變數
+    if [[ -z "$dataset_name" && -n "$DATASET" ]]; then
         dataset_name="$DATASET"
     fi
     if [[ -z "$dataset_name" ]]; then

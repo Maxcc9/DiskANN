@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import csv
+import os
 import argparse
 
 SEARCH_W_LIST = [1, 2, 4, 8, 16]
@@ -42,7 +43,19 @@ def main():
                         })
                         sid += 1
 
-    with open("./inputFiles/search_configs.csv", "w", newline="") as f:
+    # 讀取 EXPERIMENT_TAG，決定輸出資料夾
+    experiment_tag = os.environ.get("EXPERIMENT_TAG", "")
+    if experiment_tag:
+        output_dir = f"./inputFiles/{experiment_tag}"
+        output_file = f"{output_dir}/search_configs.csv"
+    else:
+        output_dir = "./inputFiles"
+        output_file = "./inputFiles/search_configs.csv"
+
+    # Auto-create directory if not exists
+    os.makedirs(output_dir, exist_ok=True)
+
+    with open(output_file, "w", newline="") as f:
         writer = csv.DictWriter(
             f,
             fieldnames=[
@@ -57,7 +70,7 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"Generated {len(rows)} search configs → search_configs.csv")
+    print(f"Generated {len(rows)} search configs → {output_file}")
 
 if __name__ == "__main__":
     main()

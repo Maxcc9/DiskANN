@@ -36,17 +36,26 @@ def main():
             })
             build_id += 1
 
-    # Auto-create directory if not exists
-    os.makedirs("./inputFiles", exist_ok=True)
+    # 讀取 EXPERIMENT_TAG，決定輸出資料夾
+    experiment_tag = os.environ.get("EXPERIMENT_TAG", "")
+    if experiment_tag:
+        output_dir = f"./inputFiles/{experiment_tag}"
+        output_file = f"{output_dir}/build_configs.csv"
+    else:
+        output_dir = "./inputFiles"
+        output_file = "./inputFiles/build_configs.csv"
 
-    with open("./inputFiles/build_configs.csv", "w", newline="") as f:
+    # Auto-create directory if not exists
+    os.makedirs(output_dir, exist_ok=True)
+
+    with open(output_file, "w", newline="") as f:
         writer = csv.DictWriter(
             f, fieldnames=["build_id", "build_R", "build_L"]
         )
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"Generated {len(rows)} build configs → build_configs.csv")
+    print(f"Generated {len(rows)} build configs → {output_file}")
 
 if __name__ == "__main__":
     main()
