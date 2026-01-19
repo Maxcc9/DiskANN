@@ -81,7 +81,13 @@ if [[ "${#expanded_files[@]}" -eq 0 ]]; then
 fi
 
 for expanded_csv in "${expanded_files[@]}"; do
-    index_tag="$(basename "$(dirname "$expanded_csv")")"
+    run_dir="$(basename "$(dirname "$expanded_csv")")"
+    parent_dir="$(basename "$(dirname "$(dirname "$expanded_csv")")")"
+    if [[ "$run_dir" =~ _W[0-9]+_L[0-9]+_K[0-9]+_cache[0-9]+_T[0-9]+ ]]; then
+        index_tag="$parent_dir"
+    else
+        index_tag="$run_dir"
+    fi
     index_prefix="${BUILD_DIR}/${index_tag}"
     output_csv="${expanded_csv%_expanded_nodes.csv}_neighbors.csv"
 

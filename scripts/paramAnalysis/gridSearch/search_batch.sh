@@ -24,6 +24,11 @@ usage() {
   EXTRA_ARGS 可補充 search_disk_index 的其他參數
   ENABLE_IOSTAT=1 時為每筆樣本記錄 iostat
   IOSTAT_INTERVAL=1, IOSTAT_DEVICE, IOSTAT_DATA_PATH
+  ENABLE_PIDSTAT=1 時為每筆樣本記錄 pidstat (per-thread)
+  PIDSTAT_INTERVAL=1
+  ENABLE_WA_LOG=1 時為每筆樣本記錄 mpstat (CPU wa)
+  WA_INTERVAL=1
+  ENABLE_THREAD_TIMELINE=1 時輸出 per-query thread timeline CSV
   ENABLE_EXPANDED_NODES=1 時為每筆樣本輸出 expanded_nodes CSV
   EXPANDED_NODES_LIMIT=0 (0 = unlimited)
   SLEEP_SECONDS=0 每筆搜尋結束後 sleep 秒數（可用於降載）
@@ -100,15 +105,20 @@ DIST_FN="${DIST_FN:-l2}"
 SEARCH_IO_LIMIT="${SEARCH_IO_LIMIT:-}"
 THREAD_OVERRIDE="${THREAD_OVERRIDE:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
-ENABLE_IOSTAT="${ENABLE_IOSTAT:-0}"
+ENABLE_IOSTAT="${ENABLE_IOSTAT:-1}"
 IOSTAT_INTERVAL="${IOSTAT_INTERVAL:-1}"
 IOSTAT_DEVICE="${IOSTAT_DEVICE:-}"
 IOSTAT_DATA_PATH="${IOSTAT_DATA_PATH:-}"
-ENABLE_EXPANDED_NODES="${ENABLE_EXPANDED_NODES:-0}"
+ENABLE_PIDSTAT="${ENABLE_PIDSTAT:-1}"
+PIDSTAT_INTERVAL="${PIDSTAT_INTERVAL:-1}"
+ENABLE_WA_LOG="${ENABLE_WA_LOG:-1}"
+WA_INTERVAL="${WA_INTERVAL:-1}"
+ENABLE_THREAD_TIMELINE="${ENABLE_THREAD_TIMELINE:-1}"
+ENABLE_EXPANDED_NODES="${ENABLE_EXPANDED_NODES:-1}"
 EXPANDED_NODES_LIMIT="${EXPANDED_NODES_LIMIT:-0}"
 K_OVERRIDE="${K_OVERRIDE:-}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-0}"
-COOLDOWN_TEMP_C="${COOLDOWN_TEMP_C:-}"
+COOLDOWN_TEMP_C="${COOLDOWN_TEMP_C:-60}"
 COOLDOWN_CHECK_INTERVAL="${COOLDOWN_CHECK_INTERVAL:-15}"
 TEMP_DEVICE="${TEMP_DEVICE:-/dev/nvme0}"
 NVME_USE_SUDO="${NVME_USE_SUDO:-0}"
@@ -176,6 +186,10 @@ if [[ -n "$COOLDOWN_TEMP_C" ]]; then
 fi
 if [[ "$ENABLE_IOSTAT" == "1" && "$MAX_PARALLEL" -ne 1 ]]; then
     echo "WARN: ENABLE_IOSTAT=1 建議單一序列執行，已將 MAX_PARALLEL 強制為 1" >&2
+    MAX_PARALLEL=1
+fi
+if [[ "$ENABLE_WA_LOG" == "1" && "$MAX_PARALLEL" -ne 1 ]]; then
+    echo "WARN: ENABLE_WA_LOG=1 建議單一序列執行，已將 MAX_PARALLEL 強制為 1" >&2
     MAX_PARALLEL=1
 fi
 if [[ "$COOLDOWN_ENABLED" == "1" && "$MAX_PARALLEL" -ne 1 ]]; then
@@ -325,7 +339,7 @@ search_threads=()
 
 exec 3< "$SEARCH_CSV"
 read -r _header <&3
-while IFS=',' read -r search_id search_W search_L search_K search_cache search_thread _rest <&3; do
+while IFS=',' read -r search_id search_W search_L search_K search_cache search_thread _rest <&3 || [[ -n "${search_id:-}" ]]; do
     search_id=$(strip_ws "${search_id:-}")
     [[ -z "$search_id" ]] && continue
     search_ids+=("$search_id")
@@ -360,23 +374,30 @@ fi
 run_one() {
     local index_prefix="$1" index_tag="$2" dataset_name="$3"
     local search_id="$4" W="$5" L="$6" K="$7" cache="$8" threads="$9"
+    local iostat_pid="" pidstat_pid="" wa_pid="" search_pid=""
     local result_dir="${OUTPUT_DIR}/${index_tag}"
     local search_tag="${search_id}"
     if [[ "$search_tag" == S* ]]; then
         search_tag="${search_tag#S}"
     fi
-    local log_file="${result_dir}/search_${search_id}.log"
+    local log_file=""
     local query_file="${QUERY_FILE:-${DISKANN_ROOT}/data/${dataset_name}/${dataset_name}_query.bin}"
     local gt_file="${GT_FILE:-${DISKANN_ROOT}/data/${dataset_name}/${dataset_name}_groundtruth.bin}"
     local thread_value="${THREAD_OVERRIDE:-${threads}}"
     local K_value="${K_OVERRIDE:-${K}}"
-    local result_prefix="${result_dir}/S${search_tag}_${index_tag}_W${W}_L${L}_K${K_value}_cache${cache}_T${threads}"
+    local result_prefix_basename="S${search_tag}_${index_tag}_W${W}_L${L}_K${K_value}_cache${cache}_T${threads}"
+    local result_subdir="${result_dir}/${result_prefix_basename}"
+    local result_prefix="${result_subdir}/${result_prefix_basename}"
     local stats_csv="${result_prefix}_summary_stats.csv"
     local per_query_csv="${result_prefix}_query_stats.csv"
+    local thread_timeline_csv="${result_prefix}_thread_timeline.csv"
     local iostat_log="${stats_csv%_summary_stats.csv}_iostat.log"
+    local pidstat_log="${stats_csv%_summary_stats.csv}_pidstat.log"
+    local wa_log="${stats_csv%_summary_stats.csv}_wa.log"
     local expanded_nodes_csv="${stats_csv%_summary_stats.csv}_expanded_nodes.csv"
 
-    mkdir -p "$result_dir"
+    mkdir -p "$result_subdir"
+    log_file="${result_subdir}/search_${search_id}.log"
 
     if [[ "$DRY_RUN" != "1" ]]; then
         if [[ ! -f "${index_prefix}_disk.index" ]]; then
@@ -412,6 +433,9 @@ run_one() {
     fi
     if [[ "${ENABLE_PER_QUERY_STATS:-0}" == "1" ]]; then
         cmd+=(--per_query_stats_path "${per_query_csv}")
+    fi
+    if [[ "${ENABLE_THREAD_TIMELINE}" == "1" ]]; then
+        cmd+=(--thread_timeline_path "${thread_timeline_csv}")
     fi
     if [[ "$ENABLE_EXPANDED_NODES" == "1" ]]; then
         cmd+=(--record_expanded_nodes --expanded_nodes_path "${expanded_nodes_csv}" --expanded_nodes_limit "${EXPANDED_NODES_LIMIT}")
@@ -450,12 +474,52 @@ run_one() {
         fi
     fi
 
-    if ! "${cmd[@]}" > "${log_file}" 2>&1 < /dev/null; then
-        if [[ -n "${iostat_pid:-}" ]]; then
-            kill "$iostat_pid" >/dev/null 2>&1 || true
+    if [[ "$ENABLE_PIDSTAT" == "1" || "$ENABLE_WA_LOG" == "1" ]]; then
+        "${cmd[@]}" > "${log_file}" 2>&1 < /dev/null &
+        search_pid=$!
+        if [[ "$ENABLE_PIDSTAT" == "1" ]]; then
+            if ! command -v pidstat >/dev/null 2>&1; then
+                echo "WARN: ENABLE_PIDSTAT=1 但找不到 pidstat，略過記錄" >&2
+            else
+                pidstat -t -u -d -r -w -p "$search_pid" "$PIDSTAT_INTERVAL" > "$pidstat_log" &
+                pidstat_pid=$!
+            fi
         fi
-        echo "✗ ${index_tag} / ${search_id} 失敗，請檢查 ${log_file}"
-        return 1
+        if [[ "$ENABLE_WA_LOG" == "1" ]]; then
+            if ! command -v mpstat >/dev/null 2>&1; then
+                echo "WARN: ENABLE_WA_LOG=1 但找不到 mpstat，略過記錄" >&2
+            else
+                mpstat -P ALL "$WA_INTERVAL" > "$wa_log" &
+                wa_pid=$!
+            fi
+        fi
+        if ! wait "$search_pid"; then
+            if [[ -n "${iostat_pid:-}" ]]; then
+                kill "$iostat_pid" >/dev/null 2>&1 || true
+            fi
+            if [[ -n "${pidstat_pid:-}" ]]; then
+                kill "$pidstat_pid" >/dev/null 2>&1 || true
+            fi
+            if [[ -n "${wa_pid:-}" ]]; then
+                kill "$wa_pid" >/dev/null 2>&1 || true
+            fi
+            echo "✗ ${index_tag} / ${search_id} 失敗，請檢查 ${log_file}"
+            return 1
+        fi
+        if [[ -n "${pidstat_pid:-}" ]]; then
+            kill "$pidstat_pid" >/dev/null 2>&1 || true
+        fi
+        if [[ -n "${wa_pid:-}" ]]; then
+            kill "$wa_pid" >/dev/null 2>&1 || true
+        fi
+    else
+        if ! "${cmd[@]}" > "${log_file}" 2>&1 < /dev/null; then
+            if [[ -n "${iostat_pid:-}" ]]; then
+                kill "$iostat_pid" >/dev/null 2>&1 || true
+            fi
+            echo "✗ ${index_tag} / ${search_id} 失敗，請檢查 ${log_file}"
+            return 1
+        fi
     fi
     if [[ -n "${iostat_pid:-}" ]]; then
         kill "$iostat_pid" >/dev/null 2>&1 || true

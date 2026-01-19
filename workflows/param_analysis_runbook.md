@@ -140,24 +140,43 @@ EXPERIMENT_TAG=sift01_test bash search_batch.sh --dataset sift --clean
 ```bash
 EXPERIMENT_TAG=siftsmall01 \
 ENABLE_IOSTAT=1 IOSTAT_INTERVAL=1 \
+ENABLE_PIDSTAT=1 PIDSTAT_INTERVAL=1 \
+ENABLE_WA_LOG=1 WA_INTERVAL=1 \
+ENABLE_THREAD_TIMELINE=1 \
 ENABLE_EXPANDED_NODES=1 EXPANDED_NODES_LIMIT=0 \
 COOLDOWN_TEMP_C=60 COOLDOWN_CHECK_INTERVAL=15 \
 NVME_USE_SUDO=0 \
 bash search_batch.sh --max-parallel 1 --clean
 ```
 
+說明：
+- `ENABLE_PIDSTAT` 需要 `pidstat`（通常在 `sysstat` 套件內），輸出 per-thread CPU/IO/等待統計
+- `ENABLE_WA_LOG` 需要 `mpstat`（同屬 `sysstat`），輸出 per-CPU `wa` (IO wait)
+- `ENABLE_THREAD_TIMELINE` 會輸出 `*_thread_timeline.csv`，含 `os_tid` 與時間窗，供對齊 OS 指標
+
 或手動指定設備（覆寫自動推斷）：
 
 ```bash
 EXPERIMENT_TAG=siftsmall01 \
 ENABLE_IOSTAT=1 IOSTAT_INTERVAL=1 \
+ENABLE_PIDSTAT=1 PIDSTAT_INTERVAL=1 \
+ENABLE_WA_LOG=1 WA_INTERVAL=1 \
+ENABLE_THREAD_TIMELINE=1 \
 ENABLE_EXPANDED_NODES=1 EXPANDED_NODES_LIMIT=0 \
 COOLDOWN_TEMP_C=60 COOLDOWN_CHECK_INTERVAL=15 \ TEMP_DEVICE=/dev/nvme1 \
 NVME_USE_SUDO=0 \
 bash search_batch.sh --max-parallel 1 --clean
 ```
 
-輸出：`outputFiles/search/siftsmall01/`
+輸出：`outputFiles/search/siftsmall01/<index_tag>/<S..._W..._L..._K..._cache..._T...>/`
+
+其中（啟用對應開關時）會包含：
+- `*_summary_stats.csv`
+- `*_expanded_nodes.csv`
+- `*_iostat.log`
+- `*_pidstat.log`
+- `*_wa.log`
+- `*_thread_timeline.csv`
 
 ### 5) 產生鄰居資訊（必做）
 

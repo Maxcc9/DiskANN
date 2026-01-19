@@ -159,7 +159,13 @@ with open(topk_nodes, "w") as f:
         f.write(f"{node_id}\n")
 PY
 
-index_tag="$(basename "$(dirname "$EXPANDED_CSV")")"
+run_dir="$(basename "$(dirname "$EXPANDED_CSV")")"
+parent_dir="$(basename "$(dirname "$(dirname "$EXPANDED_CSV")")")"
+if [[ "$run_dir" =~ _W[0-9]+_L[0-9]+_K[0-9]+_cache[0-9]+_T[0-9]+ ]]; then
+    index_tag="$parent_dir"
+else
+    index_tag="$run_dir"
+fi
 index_prefix="${BUILD_DIR}/${index_tag}"
 
 cmd=(

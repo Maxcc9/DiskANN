@@ -30,10 +30,12 @@ def find_summary_files(search_dir):
 
 def extract_index_info(file_path):
     """從檔案路徑提取 index 名稱"""
-    # 路徑格式: ./outputFiles/search/{index_name}/{result_file}
+    # 路徑格式: ./outputFiles/search/{index_name}/{run_dir}/{result_file}
     parts = Path(file_path).parts
+    if len(parts) >= 4:
+        return parts[-3]  # 返回 index 資料夾名稱
     if len(parts) >= 3:
-        return parts[-2]  # 返回倒數第二個部分（資料夾名稱）
+        return parts[-2]
     return "unknown"
 
 
@@ -156,6 +158,142 @@ def parse_iostat_log(iostat_log):
     return stats
 
 
+def _compute_numeric_stats(prefix, values):
+    vals_arr = np.array(values, dtype=float)
+    stats = {}
+    stats[f"{prefix}_mean"] = float(np.mean(vals_arr))
+    stats[f"{prefix}_gmean"] = float(np.exp(np.mean(np.log(vals_arr + 1e-10))))
+    stats[f"{prefix}_var"] = float(np.var(vals_arr))
+    stats[f"{prefix}_std"] = float(np.std(vals_arr))
+    stats[f"{prefix}_iqr"] = float(np.quantile(vals_arr, 0.75) - np.quantile(vals_arr, 0.25))
+    mean_val = stats[f"{prefix}_mean"]
+    stats[f"{prefix}_cv"] = float(stats[f"{prefix}_std"] / abs(mean_val)) if mean_val != 0 else 0.0
+    percentiles = (0.0, 0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 0.999, 1.0)
+    for p in percentiles:
+        q = float(np.quantile(vals_arr, p))
+        key = "p999" if p == 0.999 else f"p{int(p * 100)}"
+        stats[f"{prefix}_{key}"] = q
+    return stats
+
+
+def parse_pidstat_log(pidstat_log):
+    """解析 pidstat log：彙總 per-thread CPU/IO/等待等統計"""
+    if not os.path.isfile(pidstat_log):
+        return {}
+    columns = {}
+    tid_set = set()
+    header = None
+    try:
+        with open(pidstat_log, "r", encoding="utf-8", errors="ignore") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    header = None
+                    continue
+                if line.startswith("Average:"):
+                    continue
+                parts = line.split()
+                if "UID" in parts and "PID" in parts:
+                    header = parts
+                    continue
+                if not header:
+                    continue
+                if len(parts) < len(header):
+                    continue
+                if len(parts) > len(header):
+                    parts = parts[-len(header):]
+                row = dict(zip(header, parts))
+                tid = row.get("TID") or row.get("tid")
+                if tid:
+                    tid_set.add(tid)
+                for key, val in row.items():
+                    if key in ("UID", "PID", "TID", "tid"):
+                        continue
+                    try:
+                        columns.setdefault(key, []).append(float(val))
+                    except ValueError:
+                        continue
+    except Exception:
+        return {}
+
+    if not columns:
+        return {}
+    stats = {
+        "pidstat_thread_count": int(len(tid_set)) if tid_set else 0,
+    }
+    for col, vals in columns.items():
+        if not vals:
+            continue
+        stats.update(_compute_numeric_stats(f"pidstat_{col}", vals))
+    return stats
+
+
+def parse_wa_log(wa_log):
+    """解析 mpstat log：彙總 %iowait (CPU wa)"""
+    if not os.path.isfile(wa_log):
+        return {}
+    header = None
+    iowait_vals = []
+    try:
+        with open(wa_log, "r", encoding="utf-8", errors="ignore") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    header = None
+                    continue
+                if line.startswith("Linux"):
+                    continue
+                parts = line.split()
+                if "CPU" in parts and "%iowait" in parts:
+                    header = parts
+                    continue
+                if not header:
+                    continue
+                if len(parts) < len(header):
+                    continue
+                if len(parts) > len(header):
+                    parts = parts[-len(header):]
+                row = dict(zip(header, parts))
+                cpu = row.get("CPU")
+                if cpu != "all":
+                    continue
+                val = row.get("%iowait")
+                if val is None:
+                    continue
+                try:
+                    iowait_vals.append(float(val))
+                except ValueError:
+                    continue
+    except Exception:
+        return {}
+    if not iowait_vals:
+        return {}
+    return _compute_numeric_stats("wa_%iowait", iowait_vals)
+
+
+def parse_thread_timeline(thread_timeline_csv):
+    """解析 thread_timeline.csv：彙總每個 query 的執行時間與 thread 數量"""
+    if not os.path.isfile(thread_timeline_csv):
+        return {}
+    try:
+        df = pd.read_csv(thread_timeline_csv)
+    except Exception:
+        return {}
+    if df.empty:
+        return {}
+    if "duration_us" not in df.columns:
+        return {}
+    stats = {}
+    duration_vals = pd.to_numeric(df["duration_us"], errors="coerce").dropna().values
+    if duration_vals.size > 0:
+        stats.update(_compute_numeric_stats("thread_timeline_duration_us", duration_vals))
+    if "os_tid" in df.columns:
+        stats["thread_timeline_os_tid_unique"] = int(pd.Series(df["os_tid"]).nunique())
+    if "thread_id" in df.columns:
+        stats["thread_timeline_thread_id_unique"] = int(pd.Series(df["thread_id"]).nunique())
+    return stats
+
+
 def parse_topk_files(base_prefix, node_counts_csv):
     """
     解析 Top-K 相關輸出檔案，彙整單一 K 的圖統計與覆蓋率。
@@ -273,10 +411,16 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
             expanded_csv = f"{base_prefix}_expanded_nodes.csv"
             node_counts_csv = f"{base_prefix}_node_counts.csv"
             iostat_log = f"{base_prefix}_iostat.log"
+            pidstat_log = f"{base_prefix}_pidstat.log"
+            wa_log = f"{base_prefix}_wa.log"
+            thread_timeline_csv = f"{base_prefix}_thread_timeline.csv"
             topk_rows, topk_summary = parse_topk_files(base_prefix, node_counts_csv)
 
             expanded_stats = parse_expanded_stats(expanded_csv)
             iostat_stats = parse_iostat_log(iostat_log)
+            pidstat_stats = parse_pidstat_log(pidstat_log)
+            wa_stats = parse_wa_log(wa_log)
+            thread_timeline_stats = parse_thread_timeline(thread_timeline_csv)
 
             extra_cols = {
                 "run_prefix": os.path.basename(base_prefix),
@@ -284,9 +428,15 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
                 "expanded_nodes_path": expanded_csv if os.path.isfile(expanded_csv) else "",
                 "node_counts_path": node_counts_csv if os.path.isfile(node_counts_csv) else "",
                 "iostat_log_path": iostat_log if os.path.isfile(iostat_log) else "",
+                "pidstat_log_path": pidstat_log if os.path.isfile(pidstat_log) else "",
+                "wa_log_path": wa_log if os.path.isfile(wa_log) else "",
+                "thread_timeline_path": thread_timeline_csv if os.path.isfile(thread_timeline_csv) else "",
             }
             extra_cols.update(expanded_stats)
             extra_cols.update(iostat_stats)
+            extra_cols.update(pidstat_stats)
+            extra_cols.update(wa_stats)
+            extra_cols.update(thread_timeline_stats)
             extra_cols.update(topk_summary)
 
             # 添加 id 列（在最前面）
@@ -424,6 +574,9 @@ def main():
         "expanded_nodes_path",
         "node_counts_path",
         "iostat_log_path",
+        "pidstat_log_path",
+        "wa_log_path",
+        "thread_timeline_path",
         "topk_neighbors_files",
         "topk_nodes_files",
         "topk_neighbors_path",

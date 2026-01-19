@@ -5,6 +5,7 @@
 #include <boost/program_options.hpp>
 #include <regex>
 #include <type_traits>
+#include <chrono>
 
 #include "index.h"
 #include "disk_utils.h"
@@ -26,9 +27,11 @@
 #ifndef _WINDOWS
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include "linux_aligned_file_reader.h"
 #else
+#include <windows.h>
 #ifdef USE_BING_INFRA
 #include "bing_aligned_file_reader.h"
 #else
@@ -60,6 +63,22 @@ inline std::string disk_row_base_values(const diskann::DiskStatRow &row)
     return oss.str();
 }
 
+inline uint64_t get_wall_time_ns()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+inline uint32_t get_os_thread_id()
+{
+#ifdef _WINDOWS
+    return static_cast<uint32_t>(GetCurrentThreadId());
+#else
+    return static_cast<uint32_t>(syscall(SYS_gettid));
+#endif
+}
+
 void print_stats(std::string category, std::vector<float> percentiles, std::vector<float> results)
 {
     diskann::cout << std::setw(20) << category << ": " << std::flush;
@@ -84,6 +103,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       const std::vector<uint32_t> &Lvec, const float fail_if_recall_below,
                       const std::vector<std::string> &query_filters, const bool use_reorder_data = false,
                       const std::string &summary_stats_path = "", const std::string &per_query_stats_path = "",
+                      const std::string &thread_timeline_path = "",
                       const bool append_search_params = false, const std::string &expanded_nodes_path = "",
                       const uint32_t expanded_nodes_limit = 0, const bool record_expanded_nodes = false)
 {
@@ -392,6 +412,21 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         }
     }
 
+    std::ofstream thread_timeline_csv;
+    if (!thread_timeline_path.empty())
+    {
+        thread_timeline_csv.open(thread_timeline_path, std::ios::out | std::ios::trunc);
+        if (!thread_timeline_csv.is_open())
+        {
+            diskann::cerr << "Failed to open thread timeline csv file: "
+                          << thread_timeline_path << std::endl;
+        }
+        else
+        {
+            thread_timeline_csv << "query_id,L,beamwidth,thread_id,os_tid,start_time_ns,end_time_ns,duration_us\n";
+        }
+    }
+
     bool record_expanded_nodes_enabled = record_expanded_nodes;
     std::ofstream expanded_nodes_stream;
     if (record_expanded_nodes_enabled)
@@ -472,12 +507,17 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         }
 
         std::vector<uint64_t> query_result_ids_64(recall_at * query_num);
+        std::vector<uint64_t> thread_start_ns(query_num, 0);
+        std::vector<uint64_t> thread_end_ns(query_num, 0);
+        std::vector<uint32_t> thread_os_tid(query_num, 0);
         auto s = std::chrono::high_resolution_clock::now();
 
 #pragma omp parallel for schedule(dynamic, 1)
         for (int64_t i = 0; i < (int64_t)query_num; i++)
         {
             stats[i].thread_id = (unsigned)omp_get_thread_num();
+            const uint32_t os_tid = get_os_thread_id();
+            const uint64_t start_ns = get_wall_time_ns();
             if (!filtered_search)
             {
                 _pFlashIndex->cached_beam_search(query + (i * query_aligned_dim), recall_at, L,
@@ -501,6 +541,10 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                     query_result_dists[test_id].data() + (i * recall_at), optimized_beamwidth, true, label_for_search,
                     use_reorder_data, stats + i);
             }
+            const uint64_t end_ns = get_wall_time_ns();
+            thread_os_tid[i] = os_tid;
+            thread_start_ns[i] = start_ns;
+            thread_end_ns[i] = end_ns;
         }
         auto e = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> diff = e - s;
@@ -788,6 +832,22 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             }
             per_query_csv << oss.str();
         }
+        if (thread_timeline_csv.is_open())
+        {
+            std::ostringstream timeline_oss;
+            timeline_oss.setf(std::ios::fixed);
+            timeline_oss.precision(3);
+            for (uint32_t qi = 0; qi < query_num; qi++)
+            {
+                const uint64_t start_ns = thread_start_ns[qi];
+                const uint64_t end_ns = thread_end_ns[qi];
+                const double duration_us = (end_ns > start_ns) ? (end_ns - start_ns) / 1000.0 : 0.0;
+                timeline_oss << qi << "," << L << "," << optimized_beamwidth << ","
+                             << stats[qi].thread_id << "," << thread_os_tid[qi] << ","
+                             << start_ns << "," << end_ns << "," << duration_us << "\n";
+            }
+            thread_timeline_csv << timeline_oss.str();
+        }
         if (record_expanded_nodes_enabled)
         {
             uint64_t dropped_total = 0;
@@ -863,7 +923,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 int main(int argc, char **argv)
 {
     std::string data_type, dist_fn, index_path_prefix, result_path_prefix, query_file, gt_file, filter_label,
-        label_type, query_filters_file, stats_csv_path, summary_stats_path, per_query_stats_path, expanded_nodes_path;
+        label_type, query_filters_file, stats_csv_path, summary_stats_path, per_query_stats_path,
+        thread_timeline_path, expanded_nodes_path;
     uint32_t num_threads, K, W, num_nodes_to_cache, search_io_limit, expanded_nodes_limit;
     bool record_expanded_nodes = false;
     std::vector<uint32_t> Lvec;
@@ -933,6 +994,9 @@ int main(int argc, char **argv)
         optional_configs.add_options()(
             "per_query_stats_path", po::value<std::string>(&per_query_stats_path)->default_value(std::string("")),
             "Path to write per-query stats (CSV). If empty, per-query stats are not written.");
+        optional_configs.add_options()(
+            "thread_timeline_path", po::value<std::string>(&thread_timeline_path)->default_value(std::string("")),
+            "Path to write per-query thread timeline (CSV). If empty, timeline is not written.");
         optional_configs.add_options()(
             "expanded_nodes_path", po::value<std::string>(&expanded_nodes_path)->default_value(std::string("")),
             "Path to write expanded node list CSV (L,beamwidth,query_id,order,node_id)");
@@ -1030,19 +1094,22 @@ int main(int argc, char **argv)
                 return search_disk_index<float, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    summary_stats_path, per_query_stats_path, append_search_params, expanded_nodes_path,
+                    summary_stats_path, per_query_stats_path, thread_timeline_path, append_search_params,
+                    expanded_nodes_path,
                     expanded_nodes_limit, record_expanded_nodes);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    summary_stats_path, per_query_stats_path, append_search_params, expanded_nodes_path,
+                    summary_stats_path, per_query_stats_path, thread_timeline_path, append_search_params,
+                    expanded_nodes_path,
                     expanded_nodes_limit, record_expanded_nodes);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    summary_stats_path, per_query_stats_path, append_search_params, expanded_nodes_path,
+                    summary_stats_path, per_query_stats_path, thread_timeline_path, append_search_params,
+                    expanded_nodes_path,
                     expanded_nodes_limit, record_expanded_nodes);
             else
             {
@@ -1056,19 +1123,22 @@ int main(int argc, char **argv)
                 return search_disk_index<float>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                 num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                 fail_if_recall_below, query_filters, use_reorder_data,
-                                                summary_stats_path, per_query_stats_path, append_search_params,
+                                                summary_stats_path, per_query_stats_path, thread_timeline_path,
+                                                append_search_params,
                                                 expanded_nodes_path, expanded_nodes_limit, record_expanded_nodes);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                  num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                  fail_if_recall_below, query_filters, use_reorder_data,
-                                                 summary_stats_path, per_query_stats_path, append_search_params,
+                                                 summary_stats_path, per_query_stats_path, thread_timeline_path,
+                                                 append_search_params,
                                                  expanded_nodes_path, expanded_nodes_limit, record_expanded_nodes);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                   num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                   fail_if_recall_below, query_filters, use_reorder_data,
-                                                  summary_stats_path, per_query_stats_path, append_search_params,
+                                                  summary_stats_path, per_query_stats_path, thread_timeline_path,
+                                                  append_search_params,
                                                   expanded_nodes_path, expanded_nodes_limit, record_expanded_nodes);
             else
             {
