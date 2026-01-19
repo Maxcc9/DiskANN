@@ -193,7 +193,7 @@ def parse_pidstat_log(pidstat_log):
                 if line.startswith("Average:"):
                     continue
                 parts = line.split()
-                if "UID" in parts and "PID" in parts:
+                if "UID" in parts and ("PID" in parts or "TGID" in parts) and "TID" in parts:
                     header = parts
                     continue
                 if not header:
@@ -207,7 +207,7 @@ def parse_pidstat_log(pidstat_log):
                 if tid:
                     tid_set.add(tid)
                 for key, val in row.items():
-                    if key in ("UID", "PID", "TID", "tid"):
+                    if key in ("UID", "PID", "TGID", "TID", "tid", "Command", "CPU", "%guest"):
                         continue
                     try:
                         columns.setdefault(key, []).append(float(val))

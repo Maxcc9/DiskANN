@@ -61,7 +61,7 @@ ios_iqr
 ios_cv
 ios_p0~p100
 
-# frontier_queue_depth_mean_*: frontier IO batch size 的分佈（平均佇列深度）
+# frontier_queue_depth_mean_*: 單次迭代實際發出 SSD 讀取的節點數量分佈（平均佇列深度）
 frontier_queue_depth_mean_mean
 frontier_queue_depth_mean_std
 frontier_queue_depth_mean_iqr
@@ -206,6 +206,136 @@ iostat_wrqm/s_std
 iostat_wrqm/s_iqr
 iostat_wrqm/s_cv
 iostat_wrqm/s_p0~p100
+
+# pidstat_*: per-thread OS 統計（需要 ENABLE_PIDSTAT）
+# pidstat_thread_count: 觀測到的 thread 數量
+pidstat_thread_count
+
+# pidstat_%usr_*: user space CPU 使用率分佈
+pidstat_%usr_mean
+pidstat_%usr_std
+pidstat_%usr_iqr
+pidstat_%usr_cv
+pidstat_%usr_p0~p100
+
+# pidstat_%system_*: kernel space CPU 使用率分佈
+pidstat_%system_mean
+pidstat_%system_std
+pidstat_%system_iqr
+pidstat_%system_cv
+pidstat_%system_p0~p100
+
+# pidstat_%wait_*: I/O wait 比例分佈（thread 等待磁碟/IO）
+pidstat_%wait_mean
+pidstat_%wait_std
+pidstat_%wait_iqr
+pidstat_%wait_cv
+pidstat_%wait_p0~p100
+
+# pidstat_%CPU_*: thread 總 CPU 使用率分佈
+pidstat_%CPU_mean
+pidstat_%CPU_std
+pidstat_%CPU_iqr
+pidstat_%CPU_cv
+pidstat_%CPU_p0~p100
+
+# pidstat_minflt/s_*: 每秒 minor page fault 分佈
+pidstat_minflt/s_mean
+pidstat_minflt/s_std
+pidstat_minflt/s_iqr
+pidstat_minflt/s_cv
+pidstat_minflt/s_p0~p100
+
+# pidstat_majflt/s_*: 每秒 major page fault 分佈
+pidstat_majflt/s_mean
+pidstat_majflt/s_std
+pidstat_majflt/s_iqr
+pidstat_majflt/s_cv
+pidstat_majflt/s_p0~p100
+
+# pidstat_VSZ_*: 虛擬記憶體大小分佈（行程層級）
+pidstat_VSZ_mean
+pidstat_VSZ_std
+pidstat_VSZ_iqr
+pidstat_VSZ_cv
+pidstat_VSZ_p0~p100
+
+# pidstat_RSS_*: 常駐記憶體大小分佈（行程層級）
+pidstat_RSS_mean
+pidstat_RSS_std
+pidstat_RSS_iqr
+pidstat_RSS_cv
+pidstat_RSS_p0~p100
+
+# pidstat_%MEM_*: 記憶體佔比（行程層級）
+pidstat_%MEM_mean
+pidstat_%MEM_std
+pidstat_%MEM_iqr
+pidstat_%MEM_cv
+pidstat_%MEM_p0~p100
+
+# pidstat_kB_rd/s_*: 讀取吞吐量分佈
+pidstat_kB_rd/s_mean
+pidstat_kB_rd/s_std
+pidstat_kB_rd/s_iqr
+pidstat_kB_rd/s_cv
+pidstat_kB_rd/s_p0~p100
+
+# pidstat_kB_wr/s_*: 寫入吞吐量分佈
+pidstat_kB_wr/s_mean
+pidstat_kB_wr/s_std
+pidstat_kB_wr/s_iqr
+pidstat_kB_wr/s_cv
+pidstat_kB_wr/s_p0~p100
+
+# pidstat_kB_ccwr/s_*: 寫入 page cache 吞吐量分佈
+pidstat_kB_ccwr/s_mean
+pidstat_kB_ccwr/s_std
+pidstat_kB_ccwr/s_iqr
+pidstat_kB_ccwr/s_cv
+pidstat_kB_ccwr/s_p0~p100
+
+# pidstat_iodelay_*: IO 延遲統計（平台依賴）
+pidstat_iodelay_mean
+pidstat_iodelay_std
+pidstat_iodelay_iqr
+pidstat_iodelay_cv
+pidstat_iodelay_p0~p100
+
+# pidstat_cswch/s_*: 自願 context switch 次數分佈
+pidstat_cswch/s_mean
+pidstat_cswch/s_std
+pidstat_cswch/s_iqr
+pidstat_cswch/s_cv
+pidstat_cswch/s_p0~p100
+
+# pidstat_nvcswch/s_*: 非自願 context switch 次數分佈
+pidstat_nvcswch/s_mean
+pidstat_nvcswch/s_std
+pidstat_nvcswch/s_iqr
+pidstat_nvcswch/s_cv
+pidstat_nvcswch/s_p0~p100
+
+# wa_*: mpstat 觀測的 %iowait（需要 ENABLE_WA_LOG）
+wa_%iowait_mean
+wa_%iowait_std
+wa_%iowait_iqr
+wa_%iowait_cv
+wa_%iowait_p0~p100
+
+# thread_timeline_*: per-query wall time 統計（需要 ENABLE_THREAD_TIMELINE）
+# thread_timeline_duration_us_*: 每個 query 的 wall time 分佈
+thread_timeline_duration_us_mean
+thread_timeline_duration_us_std
+thread_timeline_duration_us_iqr
+thread_timeline_duration_us_cv
+thread_timeline_duration_us_p0~p100
+
+# thread_timeline_os_tid_unique: 觀測到的 OS tid 數量
+thread_timeline_os_tid_unique
+
+# thread_timeline_thread_id_unique: 觀測到的 OpenMP thread id 數量
+thread_timeline_thread_id_unique
 
 # topk_*: Top-K 熱點節點鄰居統計（靜態圖結構）
 topk_expanded_neighbor_count
