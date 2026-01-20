@@ -66,7 +66,7 @@ inline std::string disk_row_base_values(const diskann::DiskStatRow &row)
 inline uint64_t get_wall_time_ns()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
+               std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
 
