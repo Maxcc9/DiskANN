@@ -295,10 +295,30 @@ def parse_thread_timeline(thread_timeline_csv):
     return stats
 
 
+def _parse_window_ms_list(window_ms_list):
+    parsed = []
+    for v in window_ms_list:
+        if str(v).strip():
+            try:
+                value = float(v)
+                if value > 0:
+                    parsed.append(value)
+            except ValueError:
+                continue
+    if not parsed:
+        parsed = [0.5]
+    return parsed
+
+
+def _window_label(window_ms):
+    label = f"{window_ms:g}"
+    return label.replace(".", "p")
+
+
 def parse_read_trace(read_trace_csv, window_ms_list):
     """解析 read_trace.csv：統計時間窗內重複讀取"""
     if not os.path.isfile(read_trace_csv):
-        return {}
+        return {}, None
     events_by_node = {}
     total_reads = 0
     cache_hits = 0
@@ -326,10 +346,10 @@ def parse_read_trace(read_trace_csv, window_ms_list):
                 else:
                     disk_reads += 1
     except Exception:
-        return {}
+        return {}, None
 
     if not events_by_node:
-        return {}
+        return {}, None
 
     stats = {
         "read_trace_total_reads": int(total_reads),
@@ -340,10 +360,8 @@ def parse_read_trace(read_trace_csv, window_ms_list):
         "read_trace_disk_read_ratio": float(disk_reads / total_reads) if total_reads else 0.0,
     }
 
-    window_ms_list = [int(v) for v in window_ms_list if str(v).strip()]
-    if not window_ms_list:
-        window_ms_list = [50]
-    stats["read_trace_window_ms_list"] = ",".join(str(v) for v in window_ms_list)
+    window_ms_list = _parse_window_ms_list(window_ms_list)
+    stats["read_trace_window_ms_list"] = ",".join(f"{v:g}" for v in window_ms_list)
     write_node_stats = os.environ.get("READ_TRACE_NODE_STATS", "1") == "1"
     write_window_stats = os.environ.get("READ_TRACE_WINDOW_STATS", "1") == "1"
 
@@ -356,12 +374,13 @@ def parse_read_trace(read_trace_csv, window_ms_list):
         for ts, tid, is_cache_hit in node_events:
             events.append((ts, node_id, tid, is_cache_hit))
     if not events:
-        return stats
+        return stats, None
     events.sort(key=lambda x: x[0])
     t0 = events[0][0]
 
     for window_ms in window_ms_list:
-        window_ns = int(window_ms) * 1_000_000
+        window_label = _window_label(window_ms)
+        window_ns = int(window_ms * 1_000_000)
         windows = {}
         for ts, node_id, tid, is_cache_hit in events:
             win = int((ts - t0) // window_ns)
@@ -480,82 +499,82 @@ def parse_read_trace(read_trace_csv, window_ms_list):
 
         if write_window_stats and window_stats_rows:
             base_prefix = read_trace_csv[: -len("_read_trace.csv")]
-            window_stats_path = f"{base_prefix}_read_trace_window_{window_ms}ms_stats.csv"
+            window_stats_path = f"{base_prefix}_read_trace_window_{window_label}ms_stats.csv"
             with open(window_stats_path, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=list(window_stats_rows[0].keys()))
                 writer.writeheader()
                 writer.writerows(window_stats_rows)
 
-        stats[f"read_trace_repeat_reads_ms{window_ms}"] = int(sum(window_repeat_reads))
-        stats[f"read_trace_repeat_ratio_ms{window_ms}"] = (
+        stats[f"read_trace_repeat_reads_ms{window_label}"] = int(sum(window_repeat_reads))
+        stats[f"read_trace_repeat_ratio_ms{window_label}"] = (
             float(sum(window_repeat_reads) / total_reads) if total_reads else 0.0
         )
-        stats[f"read_trace_repeat_multi_thread_reads_ms{window_ms}"] = int(sum(window_repeat_multi_thread_reads))
-        stats[f"read_trace_repeat_multi_thread_ratio_ms{window_ms}"] = (
+        stats[f"read_trace_repeat_multi_thread_reads_ms{window_label}"] = int(sum(window_repeat_multi_thread_reads))
+        stats[f"read_trace_repeat_multi_thread_ratio_ms{window_label}"] = (
             float(sum(window_repeat_multi_thread_reads) / total_reads) if total_reads else 0.0
         )
         if window_max_unique_threads:
             stats.update(_compute_numeric_stats(
-                f"read_trace_max_unique_threads_ms{window_ms}",
+                f"read_trace_max_unique_threads_ms{window_label}",
                 window_max_unique_threads,
             ))
         if window_max_node_reads:
             stats.update(_compute_numeric_stats(
-                f"read_trace_node_window_reads_ms{window_ms}",
+                f"read_trace_node_window_reads_ms{window_label}",
                 window_max_node_reads,
             ))
         if window_max_node_reads_ratio:
             stats.update(_compute_numeric_stats(
-                f"read_trace_node_window_reads_ratio_ms{window_ms}",
+                f"read_trace_node_window_reads_ratio_ms{window_label}",
                 window_max_node_reads_ratio,
             ))
         if window_max_same_thread_reads:
             stats.update(_compute_numeric_stats(
-                f"read_trace_node_same_thread_reads_ms{window_ms}",
+                f"read_trace_node_same_thread_reads_ms{window_label}",
                 window_max_same_thread_reads,
             ))
         if window_max_same_thread_reads_ratio:
             stats.update(_compute_numeric_stats(
-                f"read_trace_node_same_thread_reads_ratio_ms{window_ms}",
+                f"read_trace_node_same_thread_reads_ratio_ms{window_label}",
                 window_max_same_thread_reads_ratio,
             ))
         if window_max_multi_thread_reads:
             stats.update(_compute_numeric_stats(
-                f"read_trace_node_multi_thread_reads_ms{window_ms}",
+                f"read_trace_node_multi_thread_reads_ms{window_label}",
                 window_max_multi_thread_reads,
             ))
         if window_max_multi_thread_reads_ratio:
             stats.update(_compute_numeric_stats(
-                f"read_trace_node_multi_thread_reads_ratio_ms{window_ms}",
+                f"read_trace_node_multi_thread_reads_ratio_ms{window_label}",
                 window_max_multi_thread_reads_ratio,
             ))
         if window_node_reads:
             stats.update(_compute_numeric_stats(
-                f"read_trace_window_node_reads_ms{window_ms}",
+                f"read_trace_window_node_reads_ms{window_label}",
                 window_node_reads,
             ))
         if window_node_read_ratios:
             stats.update(_compute_numeric_stats(
-                f"read_trace_window_node_read_ratio_ms{window_ms}",
+                f"read_trace_window_node_read_ratio_ms{window_label}",
                 window_node_read_ratios,
             ))
         if window_node_threads:
             stats.update(_compute_numeric_stats(
-                f"read_trace_window_node_threads_ms{window_ms}",
+                f"read_trace_window_node_threads_ms{window_label}",
                 window_node_threads,
             ))
         if window_node_thread_ratios:
             stats.update(_compute_numeric_stats(
-                f"read_trace_window_node_thread_ratio_ms{window_ms}",
+                f"read_trace_window_node_thread_ratio_ms{window_label}",
                 window_node_thread_ratios,
             ))
 
-        stats[f"read_trace_repeat_reads_disk_ms{window_ms}"] = int(sum(window_disk_repeat_reads))
-        stats[f"read_trace_repeat_ratio_disk_ms{window_ms}"] = (
+        stats[f"read_trace_repeat_reads_disk_ms{window_label}"] = int(sum(window_disk_repeat_reads))
+        stats[f"read_trace_repeat_ratio_disk_ms{window_label}"] = (
             float(sum(window_disk_repeat_reads) / disk_reads) if disk_reads else 0.0
         )
-        stats[f"read_trace_repeat_multi_thread_reads_disk_ms{window_ms}"] = int(sum(window_disk_repeat_multi_thread_reads))
-        stats[f"read_trace_repeat_multi_thread_ratio_disk_ms{window_ms}"] = (
+        stats[f"read_trace_repeat_multi_thread_reads_disk_ms{window_label}"] = int(sum(window_disk_repeat_multi_thread_reads))
+        stats[f"read_trace_repeat_multi_thread_ratio_disk_ms{window_label}"] = (
             float(sum(window_disk_repeat_multi_thread_reads) / disk_reads) if disk_reads else 0.0
         )
 
@@ -568,7 +587,7 @@ def parse_read_trace(read_trace_csv, window_ms_list):
 
         if write_node_stats:
             base_prefix = read_trace_csv[: -len("_read_trace.csv")]
-            node_stats_path = f"{base_prefix}_read_trace_window_{window_ms}ms_node_stats.csv"
+            node_stats_path = f"{base_prefix}_read_trace_window_{window_label}ms_node_stats.csv"
             rows = []
             for node_id, total in per_node_total.items():
                 node_events = events_by_node.get(node_id, [])
@@ -611,7 +630,8 @@ def parse_read_trace(read_trace_csv, window_ms_list):
             key=lambda r: (r["repeat_multi_thread_reads"], r["total_reads"], r["unique_threads"]), reverse=True
         )
         if hot_rows:
-            hot_path = f"{base_prefix}_read_trace_hot_nodes_{hot_window_ms}ms_top{topk}.csv"
+            hot_window_label = _window_label(hot_window_ms)
+            hot_path = f"{base_prefix}_read_trace_hot_nodes_{hot_window_label}ms_top{topk}.csv"
             with open(hot_path, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=list(hot_rows[0].keys()))
                 writer.writeheader()
@@ -623,6 +643,143 @@ def parse_read_trace(read_trace_csv, window_ms_list):
             stats["read_trace_hot_nodes_repeat_mt_share"] = (
                 float(topk_repeat_mt / total_reads) if total_reads else 0.0
             )
+
+    return stats, t0
+
+
+def parse_thread_timeline_windows(thread_timeline_csv, window_ms_list, window_start_ns=None):
+    """解析 thread_timeline.csv：彙總每個時間窗的 latency 分佈"""
+    if not os.path.isfile(thread_timeline_csv):
+        return {}, {}
+    try:
+        df = pd.read_csv(thread_timeline_csv)
+    except Exception:
+        return {}, {}
+    if df.empty:
+        return {}, {}
+
+    for col in ("start_time_ns", "duration_us"):
+        if col not in df.columns:
+            return {}, {}
+
+    df = df.copy()
+    df["start_time_ns"] = pd.to_numeric(df["start_time_ns"], errors="coerce")
+    df["duration_us"] = pd.to_numeric(df["duration_us"], errors="coerce")
+    df = df.dropna(subset=["start_time_ns", "duration_us"])
+    if df.empty:
+        return {}, {}
+
+    if window_start_ns is not None:
+        min_start_ns = int(df["start_time_ns"].min())
+        df["aligned_start_ns"] = df["start_time_ns"] - min_start_ns + int(window_start_ns)
+    else:
+        df["aligned_start_ns"] = df["start_time_ns"]
+
+    window_ms_list = _parse_window_ms_list(window_ms_list)
+
+    write_window_stats = os.environ.get("THREAD_TIMELINE_WINDOW_STATS", "1") == "1"
+    window_paths = {}
+    window_frames = {}
+
+    for window_ms in window_ms_list:
+        window_label = _window_label(window_ms)
+        window_ns = int(window_ms * 1_000_000)
+        window_id = ((df["aligned_start_ns"] - int(window_start_ns or 0)) // window_ns).astype("int64")
+        df_win = df.assign(window_id=window_id)
+        grouped = df_win.groupby("window_id")["duration_us"]
+        rows = []
+        for win, durations in grouped:
+            vals = durations.values
+            if vals.size == 0:
+                continue
+            start_ns = int((window_start_ns or 0) + win * window_ns)
+            end_ns = int(start_ns + window_ns)
+            rows.append(
+                {
+                    "window_id": int(win),
+                    "window_start_ns": start_ns,
+                    "window_end_ns": end_ns,
+                    "query_count": int(vals.size),
+                    "latency_mean_us": float(np.mean(vals)),
+                    "latency_p50_us": float(np.quantile(vals, 0.50)),
+                    "latency_p95_us": float(np.quantile(vals, 0.95)),
+                    "latency_p99_us": float(np.quantile(vals, 0.99)),
+                    "latency_p100_us": float(np.quantile(vals, 1.0)),
+                }
+            )
+
+        if rows:
+            window_df = pd.DataFrame(rows).sort_values("window_id")
+            window_frames[window_label] = window_df
+            if write_window_stats:
+                base_prefix = thread_timeline_csv[: -len("_thread_timeline.csv")]
+                window_path = f"{base_prefix}_thread_timeline_window_{window_label}ms_latency.csv"
+                window_df.to_csv(window_path, index=False)
+                window_paths[window_label] = window_path
+
+    return window_paths, window_frames
+
+
+def compute_window_correlations(read_trace_window_path, latency_window_df, window_label):
+    """計算 read_trace window stats 與 latency window stats 的相關性"""
+    if not os.path.isfile(read_trace_window_path):
+        return {}
+    if latency_window_df is None or latency_window_df.empty:
+        return {}
+    try:
+        read_df = pd.read_csv(read_trace_window_path)
+    except Exception:
+        return {}
+    if read_df.empty or "window_id" not in read_df.columns:
+        return {}
+
+    read_df = read_df.copy()
+    if "window_start_ns" not in read_df.columns or "window_end_ns" not in read_df.columns:
+        return {}
+    read_df["repeat_ratio"] = read_df["repeat_reads"] / read_df["total_reads"].replace(0, np.nan)
+    read_df["repeat_multi_thread_ratio"] = read_df["repeat_multi_thread_reads"] / read_df["total_reads"].replace(0, np.nan)
+
+    latency_df = latency_window_df.copy()
+    if "window_id" not in latency_df.columns:
+        return {}
+    merged = pd.merge(read_df, latency_df, on="window_id", how="inner")
+    if merged.empty:
+        return {}
+
+    def safe_corr(a, b):
+        a_vals = pd.to_numeric(a, errors="coerce")
+        b_vals = pd.to_numeric(b, errors="coerce")
+        mask = a_vals.notna() & b_vals.notna()
+        if mask.sum() < 3:
+            return 0.0
+        return float(a_vals[mask].corr(b_vals[mask], method="pearson"))
+
+    metrics = {
+        "repeat_ratio": "repeat_ratio",
+        "repeat_multi_thread_ratio": "repeat_multi_thread_ratio",
+        "max_node_reads_ratio": "max_node_reads_ratio",
+        "max_same_thread_reads_ratio": "max_same_thread_reads_ratio",
+        "max_multi_thread_reads_ratio": "max_multi_thread_reads_ratio",
+        "max_unique_threads": "max_unique_threads",
+        "total_reads": "total_reads",
+    }
+    latency_metrics = [
+        "latency_mean_us",
+        "latency_p50_us",
+        "latency_p95_us",
+        "latency_p99_us",
+        "latency_p100_us",
+    ]
+
+    stats = {}
+    for metric_key, col in metrics.items():
+        if col not in merged.columns:
+            continue
+        for latency_col in latency_metrics:
+            if latency_col not in merged.columns:
+                continue
+            stat_key = f"read_trace_window_corr_{metric_key}_vs_{latency_col}_ms{window_label}"
+            stats[stat_key] = safe_corr(merged[col], merged[latency_col])
 
     return stats
 
@@ -733,7 +890,7 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
     else:
         print(f"處理 {len(summary_files)} 個檔案...", end='', flush=True)
     
-    window_env = os.environ.get("READ_TRACE_WINDOWS_MS", os.environ.get("READ_TRACE_WINDOW_MS", "50"))
+    window_env = os.environ.get("READ_TRACE_WINDOWS_MS", os.environ.get("READ_TRACE_WINDOW_MS", "0.5"))
     read_trace_window_ms_list = [v.strip() for v in window_env.split(",") if v.strip()]
     all_data = []
     topk_data = []
@@ -757,7 +914,10 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
             pidstat_stats = parse_pidstat_log(pidstat_log)
             wa_stats = parse_wa_log(wa_log)
             thread_timeline_stats = parse_thread_timeline(thread_timeline_csv)
-            read_trace_stats = parse_read_trace(read_trace_csv, window_ms_list=read_trace_window_ms_list)
+            read_trace_stats, read_trace_t0_ns = parse_read_trace(
+                read_trace_csv,
+                window_ms_list=read_trace_window_ms_list,
+            )
 
             extra_cols = {
                 "run_prefix": os.path.basename(base_prefix),
@@ -777,6 +937,21 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
             extra_cols.update(thread_timeline_stats)
             extra_cols.update(read_trace_stats)
             extra_cols.update(topk_summary)
+            if read_trace_t0_ns is not None and os.path.isfile(thread_timeline_csv):
+                window_latency_paths, window_latency_frames = parse_thread_timeline_windows(
+                    thread_timeline_csv,
+                    window_ms_list=read_trace_window_ms_list,
+                    window_start_ns=read_trace_t0_ns,
+                )
+                window_list_str = read_trace_stats.get(
+                    "read_trace_window_ms_list",
+                    ",".join(read_trace_window_ms_list),
+                )
+                extra_cols["thread_timeline_window_ms_list"] = window_list_str
+                for window_label, latency_df in window_latency_frames.items():
+                    read_trace_window_path = f"{base_prefix}_read_trace_window_{window_label}ms_stats.csv"
+                    corr_stats = compute_window_correlations(read_trace_window_path, latency_df, window_label)
+                    extra_cols.update(corr_stats)
 
             # 添加 id 列（在最前面）
             ids = list(range(row_id, row_id + len(df)))

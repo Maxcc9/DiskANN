@@ -185,7 +185,8 @@ bash search_batch.sh --max-parallel 1 --clean
 - `*_read_trace_window_<W>ms_stats.csv`
 
 read trace 相關環境變數（彙總時使用）：
-- `READ_TRACE_WINDOWS_MS=10,50,100` 控制多個時間窗（預設 50）
+- `READ_TRACE_WINDOWS_MS=0.5,1,2,5` 控制多個時間窗（預設 0.5）
+  小數視窗在欄位名會轉成 p（例：0.5ms -> ms0p5）
 - `READ_TRACE_TOPK=100` 產生熱點節點清單的 Top-K（預設 100）
 - `READ_TRACE_NODE_STATS=1` 產出每個 node 的時間窗統計檔（預設 1）
 - `READ_TRACE_WINDOW_STATS=1` 產出每個時間窗統計檔（預設 1）
