@@ -181,10 +181,14 @@ bash search_batch.sh --max-parallel 1 --clean
 - `*_thread_timeline.csv`
 - `*_read_trace.csv`
 - `*_read_trace_hot_nodes_<W>ms_top<N>.csv`
+- `*_read_trace_window_<W>ms_node_stats.csv`
+- `*_read_trace_window_<W>ms_stats.csv`
 
 read trace 相關環境變數（彙總時使用）：
 - `READ_TRACE_WINDOWS_MS=10,50,100` 控制多個時間窗（預設 50）
 - `READ_TRACE_TOPK=100` 產生熱點節點清單的 Top-K（預設 100）
+- `READ_TRACE_NODE_STATS=1` 產出每個 node 的時間窗統計檔（預設 1）
+- `READ_TRACE_WINDOW_STATS=1` 產出每個時間窗統計檔（預設 1）
 
 ### 5) 產生鄰居資訊（必做）
 

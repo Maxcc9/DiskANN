@@ -337,6 +337,140 @@ thread_timeline_os_tid_unique
 # thread_timeline_thread_id_unique: 觀測到的 OpenMP thread id 數量
 thread_timeline_thread_id_unique
 
+# read_trace_*: SSD node read 事件統計（需要 ENABLE_READ_TRACE）
+# read_trace_total_reads: 總讀取事件數（含 cache hit），等於 read_trace.csv 的總列數
+read_trace_total_reads
+
+# read_trace_unique_nodes: 有被讀取的 unique node 數（node_id 去重數量）
+read_trace_unique_nodes
+
+# read_trace_cache_hits: cache hit 事件數（is_cache_hit=1 的筆數）
+read_trace_cache_hits
+
+# read_trace_disk_reads: SSD 讀取事件數（is_cache_hit=0 的筆數）
+read_trace_disk_reads
+
+# read_trace_cache_hit_ratio: cache hit 佔比 = read_trace_cache_hits / read_trace_total_reads
+read_trace_cache_hit_ratio
+
+# read_trace_disk_read_ratio: SSD 讀取佔比 = read_trace_disk_reads / read_trace_total_reads
+read_trace_disk_read_ratio
+
+# read_trace_window_ms_list: 記錄視窗清單（逗號分隔，例如 10,50,100）
+read_trace_window_ms_list
+
+# read_trace_repeat_reads_ms{W}: 以時間窗為單位的重複讀取事件數（含 cache hit）
+#   計算方式：對每個時間窗，repeat = sum(max(node_count-1, 0))，再跨窗加總
+read_trace_repeat_reads_ms{W}
+
+# read_trace_repeat_ratio_ms{W}: 重複讀取比例 = read_trace_repeat_reads_ms{W} / read_trace_total_reads
+read_trace_repeat_ratio_ms{W}
+
+# read_trace_repeat_multi_thread_reads_ms{W}: 多 thread 重複事件數（含 cache hit）
+#   計算方式：對每個時間窗，sum(node_count) 其中 node_count>1 且該窗內 threads>=2
+read_trace_repeat_multi_thread_reads_ms{W}
+
+# read_trace_repeat_multi_thread_ratio_ms{W}: 多 thread 重複比例 =
+#   read_trace_repeat_multi_thread_reads_ms{W} / read_trace_total_reads
+read_trace_repeat_multi_thread_ratio_ms{W}
+
+# read_trace_max_unique_threads_ms{W}_*: 每個時間窗內「最大不同 thread 數」的分佈
+#   先對每個時間窗取 max(unique_threads_per_node)，再做 mean/std/iqr/cv/p0~p100
+read_trace_max_unique_threads_ms{W}_mean
+read_trace_max_unique_threads_ms{W}_std
+read_trace_max_unique_threads_ms{W}_iqr
+read_trace_max_unique_threads_ms{W}_cv
+read_trace_max_unique_threads_ms{W}_p0~p100
+
+# read_trace_repeat_*_disk_ms{W}: 只針對 SSD read（is_cache_hit=0）的重複讀取統計
+#   與 read_trace_repeat_*_ms{W} 相同算法，但只計 SSD read
+read_trace_repeat_reads_disk_ms{W}
+read_trace_repeat_ratio_disk_ms{W}
+read_trace_repeat_multi_thread_reads_disk_ms{W}
+read_trace_repeat_multi_thread_ratio_disk_ms{W}
+
+# read_trace_node_window_reads_ms{W}_*: 每個時間窗的「最大單一 node 讀取次數」分佈
+#   計算方式：每個時間窗取 max(node_reads) -> 對所有窗做統計
+read_trace_node_window_reads_ms{W}_mean
+read_trace_node_window_reads_ms{W}_std
+read_trace_node_window_reads_ms{W}_iqr
+read_trace_node_window_reads_ms{W}_cv
+read_trace_node_window_reads_ms{W}_p0~p100
+
+# read_trace_node_window_reads_ratio_ms{W}_*: 每個時間窗的「max(node_reads)/window_total」分佈
+read_trace_node_window_reads_ratio_ms{W}_mean
+read_trace_node_window_reads_ratio_ms{W}_std
+read_trace_node_window_reads_ratio_ms{W}_iqr
+read_trace_node_window_reads_ratio_ms{W}_cv
+read_trace_node_window_reads_ratio_ms{W}_p0~p100
+
+# read_trace_node_same_thread_reads_ms{W}_*: 每個時間窗的「max(per-thread node_reads)」分佈
+read_trace_node_same_thread_reads_ms{W}_mean
+read_trace_node_same_thread_reads_ms{W}_std
+read_trace_node_same_thread_reads_ms{W}_iqr
+read_trace_node_same_thread_reads_ms{W}_cv
+read_trace_node_same_thread_reads_ms{W}_p0~p100
+
+# read_trace_node_same_thread_reads_ratio_ms{W}_*: 每個時間窗的「max(per-thread node_reads)/window_total」分佈
+read_trace_node_same_thread_reads_ratio_ms{W}_mean
+read_trace_node_same_thread_reads_ratio_ms{W}_std
+read_trace_node_same_thread_reads_ratio_ms{W}_iqr
+read_trace_node_same_thread_reads_ratio_ms{W}_cv
+read_trace_node_same_thread_reads_ratio_ms{W}_p0~p100
+
+# read_trace_node_multi_thread_reads_ms{W}_*: 每個時間窗的「max(node_reads) among nodes with >=2 threads」分佈
+read_trace_node_multi_thread_reads_ms{W}_mean
+read_trace_node_multi_thread_reads_ms{W}_std
+read_trace_node_multi_thread_reads_ms{W}_iqr
+read_trace_node_multi_thread_reads_ms{W}_cv
+read_trace_node_multi_thread_reads_ms{W}_p0~p100
+
+# read_trace_node_multi_thread_reads_ratio_ms{W}_*: 每個時間窗的「max(node_reads with >=2 threads)/window_total」分佈
+read_trace_node_multi_thread_reads_ratio_ms{W}_mean
+read_trace_node_multi_thread_reads_ratio_ms{W}_std
+read_trace_node_multi_thread_reads_ratio_ms{W}_iqr
+read_trace_node_multi_thread_reads_ratio_ms{W}_cv
+read_trace_node_multi_thread_reads_ratio_ms{W}_p0~p100
+
+# read_trace_window_node_reads_ms{W}_*: 「以時間窗為單位」統計 node 讀取次數分佈
+#   計算方式：對每個時間窗 W，計算 node_counts（node_id -> 次數），
+#   再把該窗所有次數值加入全域列表，最後對列表做 mean/std/iqr/cv/p0~p100。
+read_trace_window_node_reads_ms{W}_mean
+read_trace_window_node_reads_ms{W}_std
+read_trace_window_node_reads_ms{W}_iqr
+read_trace_window_node_reads_ms{W}_cv
+read_trace_window_node_reads_ms{W}_p0~p100
+
+# read_trace_window_node_read_ratio_ms{W}_*: 每個時間窗內「node_count/window_total」列表的分佈
+read_trace_window_node_read_ratio_ms{W}_mean
+read_trace_window_node_read_ratio_ms{W}_std
+read_trace_window_node_read_ratio_ms{W}_iqr
+read_trace_window_node_read_ratio_ms{W}_cv
+read_trace_window_node_read_ratio_ms{W}_p0~p100
+
+# read_trace_window_node_threads_ms{W}_*: 每個時間窗內「node 被多少 thread 存取」列表的分佈
+#   範例：窗內 A={t1,t2}, B={t3} -> 追加 {2,1}
+read_trace_window_node_threads_ms{W}_mean
+read_trace_window_node_threads_ms{W}_std
+read_trace_window_node_threads_ms{W}_iqr
+read_trace_window_node_threads_ms{W}_cv
+read_trace_window_node_threads_ms{W}_p0~p100
+
+# read_trace_window_node_thread_ratio_ms{W}_*: 每個時間窗內「node threads / 該窗總 threads」列表分佈
+#   範例：窗內 threads=3 -> 追加 {2/3,1/3}
+read_trace_window_node_thread_ratio_ms{W}_mean
+read_trace_window_node_thread_ratio_ms{W}_std
+read_trace_window_node_thread_ratio_ms{W}_iqr
+read_trace_window_node_thread_ratio_ms{W}_cv
+read_trace_window_node_thread_ratio_ms{W}_p0~p100
+
+# read_trace_hot_nodes_*: 熱點節點貢獻度（依 hot window W 與 TOPK，彙總 *_read_trace_hot_nodes_<W>ms_top<N>.csv）
+read_trace_hot_nodes_topk
+# read_trace_hot_nodes_read_share: Top-K 熱點節點讀取事件數總和 / read_trace_total_reads
+read_trace_hot_nodes_read_share
+# read_trace_hot_nodes_repeat_mt_share: Top-K 熱點節點的多 thread 重複事件數總和 / read_trace_total_reads
+read_trace_hot_nodes_repeat_mt_share
+
 # topk_*: Top-K 熱點節點鄰居統計（靜態圖結構）
 topk_expanded_neighbor_count
 topk_expanded_unique_neighbors_count
