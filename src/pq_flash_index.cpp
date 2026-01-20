@@ -9,9 +9,14 @@
 #include "pq_flash_index.h"
 #include "cosine_similarity.h"
 
+#include <chrono>
+
 #ifdef _WINDOWS
+#include <windows.h>
 #include "windows_aligned_file_reader.h"
 #else
+#include <sys/syscall.h>
+#include <unistd.h>
 #include "linux_aligned_file_reader.h"
 #endif
 
@@ -27,6 +32,24 @@
 
 namespace diskann
 {
+
+static thread_local uint32_t g_query_id = std::numeric_limits<uint32_t>::max();
+
+inline uint64_t steady_time_ns()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+inline uint32_t os_thread_id()
+{
+#ifdef _WINDOWS
+    return static_cast<uint32_t>(GetCurrentThreadId());
+#else
+    return static_cast<uint32_t>(syscall(SYS_gettid));
+#endif
+}
 
 template <typename T, typename LabelT>
 PQFlashIndex<T, LabelT>::PQFlashIndex(std::shared_ptr<AlignedFileReader> &fileReader, diskann::Metric m)
@@ -97,6 +120,36 @@ template <typename T, typename LabelT> PQFlashIndex<T, LabelT>::~PQFlashIndex()
     {
         delete[] _medoids;
     }
+}
+
+template <typename T, typename LabelT>
+void PQFlashIndex<T, LabelT>::enable_read_trace(const std::string &path)
+{
+    std::lock_guard<std::mutex> lock(_read_trace_mutex);
+    _read_trace_stream.reset(new std::ofstream(path, std::ios::out | std::ios::trunc));
+    if (_read_trace_stream && _read_trace_stream->is_open())
+    {
+        (*_read_trace_stream) << "ts_ns,node_id,os_tid,omp_tid,query_id,read_bytes,is_cache_hit\n";
+        _read_trace_enabled = true;
+    }
+    else
+    {
+        _read_trace_enabled = false;
+    }
+}
+
+template <typename T, typename LabelT>
+void PQFlashIndex<T, LabelT>::disable_read_trace()
+{
+    std::lock_guard<std::mutex> lock(_read_trace_mutex);
+    _read_trace_stream.reset();
+    _read_trace_enabled = false;
+}
+
+template <typename T, typename LabelT>
+void PQFlashIndex<T, LabelT>::set_thread_query_id(uint32_t query_id)
+{
+    g_query_id = query_id;
 }
 
 template <typename T, typename LabelT> inline uint64_t PQFlashIndex<T, LabelT>::get_node_sector(uint64_t node_id)
@@ -1481,6 +1534,19 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                 frontier_nhoods.push_back(fnhood);
                 frontier_read_reqs.emplace_back(get_node_sector((size_t)id) * defaults::SECTOR_LEN,
                                                 num_sectors_per_node * defaults::SECTOR_LEN, fnhood.second);
+                if (_read_trace_enabled)
+                {
+                    const uint64_t ts = steady_time_ns();
+                    const uint32_t tid = os_thread_id();
+                    const uint32_t omp_tid = static_cast<uint32_t>(omp_get_thread_num());
+                    const uint32_t bytes = static_cast<uint32_t>(num_sectors_per_node * defaults::SECTOR_LEN);
+                    std::lock_guard<std::mutex> lock(_read_trace_mutex);
+                    if (_read_trace_stream && _read_trace_stream->is_open())
+                    {
+                        (*_read_trace_stream) << ts << "," << id << "," << tid << "," << omp_tid << ","
+                                              << g_query_id << "," << bytes << ",0\n";
+                    }
+                }
                 if (stats != nullptr)
                 {
                     uint64_t read_bytes = num_sectors_per_node * defaults::SECTOR_LEN;
@@ -1541,6 +1607,18 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         // process cached nhoods
         for (auto &cached_nhood : cached_nhoods)
         {
+            if (_read_trace_enabled)
+            {
+                const uint64_t ts = steady_time_ns();
+                const uint32_t tid = os_thread_id();
+                const uint32_t omp_tid = static_cast<uint32_t>(omp_get_thread_num());
+                std::lock_guard<std::mutex> lock(_read_trace_mutex);
+                if (_read_trace_stream && _read_trace_stream->is_open())
+                {
+                    (*_read_trace_stream) << ts << "," << cached_nhood.first << "," << tid << "," << omp_tid << ","
+                                          << g_query_id << ",0,1\n";
+                }
+            }
             // Record actual expanded node (cache hit case)
             if (stats != nullptr && stats->expanded_nodes_enabled)
             {

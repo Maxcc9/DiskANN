@@ -29,6 +29,7 @@ usage() {
   ENABLE_WA_LOG=1 時為每筆樣本記錄 mpstat (CPU wa)
   WA_INTERVAL=1
   ENABLE_THREAD_TIMELINE=1 時輸出 per-query thread timeline CSV
+  ENABLE_READ_TRACE=1 時輸出 SSD node read trace CSV
   ENABLE_EXPANDED_NODES=1 時為每筆樣本輸出 expanded_nodes CSV
   EXPANDED_NODES_LIMIT=0 (0 = unlimited)
   SLEEP_SECONDS=0 每筆搜尋結束後 sleep 秒數（可用於降載）
@@ -114,6 +115,7 @@ PIDSTAT_INTERVAL="${PIDSTAT_INTERVAL:-1}"
 ENABLE_WA_LOG="${ENABLE_WA_LOG:-1}"
 WA_INTERVAL="${WA_INTERVAL:-1}"
 ENABLE_THREAD_TIMELINE="${ENABLE_THREAD_TIMELINE:-1}"
+ENABLE_READ_TRACE="${ENABLE_READ_TRACE:-1}"
 ENABLE_EXPANDED_NODES="${ENABLE_EXPANDED_NODES:-1}"
 EXPANDED_NODES_LIMIT="${EXPANDED_NODES_LIMIT:-0}"
 K_OVERRIDE="${K_OVERRIDE:-}"
@@ -391,6 +393,7 @@ run_one() {
     local stats_csv="${result_prefix}_summary_stats.csv"
     local per_query_csv="${result_prefix}_query_stats.csv"
     local thread_timeline_csv="${result_prefix}_thread_timeline.csv"
+    local read_trace_csv="${result_prefix}_read_trace.csv"
     local iostat_log="${stats_csv%_summary_stats.csv}_iostat.log"
     local pidstat_log="${stats_csv%_summary_stats.csv}_pidstat.log"
     local wa_log="${stats_csv%_summary_stats.csv}_wa.log"
@@ -436,6 +439,9 @@ run_one() {
     fi
     if [[ "${ENABLE_THREAD_TIMELINE}" == "1" ]]; then
         cmd+=(--thread_timeline_path "${thread_timeline_csv}")
+    fi
+    if [[ "${ENABLE_READ_TRACE}" == "1" ]]; then
+        cmd+=(--read_trace_path "${read_trace_csv}")
     fi
     if [[ "$ENABLE_EXPANDED_NODES" == "1" ]]; then
         cmd+=(--record_expanded_nodes --expanded_nodes_path "${expanded_nodes_csv}" --expanded_nodes_limit "${EXPANDED_NODES_LIMIT}")

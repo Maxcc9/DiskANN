@@ -15,6 +15,9 @@
 #include "scratch.h"
 #include "tsl/robin_map.h"
 #include "tsl/robin_set.h"
+#include <fstream>
+#include <memory>
+#include <mutex>
 
 #define FULL_PRECISION_REORDER_MULTIPLIER 3
 
@@ -82,6 +85,9 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
                                               QueryStats *stats = nullptr);
 
     DISKANN_DLLEXPORT LabelT get_converted_label(const std::string &filter_label);
+    DISKANN_DLLEXPORT void enable_read_trace(const std::string &path);
+    DISKANN_DLLEXPORT void disable_read_trace();
+    DISKANN_DLLEXPORT void set_thread_query_id(uint32_t query_id);
 
     DISKANN_DLLEXPORT uint32_t range_search(const T *query1, const double range, const uint64_t min_l_search,
                                             const uint64_t max_l_search, std::vector<uint64_t> &indices,
@@ -218,6 +224,10 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
     uint64_t _max_nthreads;
     bool _load_flag = false;
     bool _count_visited_nodes = false;
+
+    std::mutex _read_trace_mutex;
+    std::unique_ptr<std::ofstream> _read_trace_stream;
+    bool _read_trace_enabled = false;
     bool _reorder_data_exists = false;
     uint64_t _reoreder_data_offset = 0;
 

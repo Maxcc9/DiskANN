@@ -15,6 +15,7 @@ import sys
 import argparse
 import glob
 import re
+import csv
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
@@ -294,6 +295,200 @@ def parse_thread_timeline(thread_timeline_csv):
     return stats
 
 
+def parse_read_trace(read_trace_csv, window_ms_list):
+    """解析 read_trace.csv：統計時間窗內重複讀取"""
+    if not os.path.isfile(read_trace_csv):
+        return {}
+    events_by_node = {}
+    total_reads = 0
+    cache_hits = 0
+    disk_reads = 0
+    try:
+        with open(read_trace_csv, newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames is None:
+                return {}
+            required = {"ts_ns", "node_id", "os_tid", "is_cache_hit"}
+            if not required.issubset(set(reader.fieldnames)):
+                return {}
+            for row in reader:
+                try:
+                    ts = int(row["ts_ns"])
+                    node_id = int(row["node_id"])
+                    tid = int(row["os_tid"])
+                    is_cache_hit = int(row["is_cache_hit"]) == 1
+                except (KeyError, ValueError):
+                    continue
+                events_by_node.setdefault(node_id, []).append((ts, tid, is_cache_hit))
+                total_reads += 1
+                if is_cache_hit:
+                    cache_hits += 1
+                else:
+                    disk_reads += 1
+    except Exception:
+        return {}
+
+    if not events_by_node:
+        return {}
+
+    def calc_window_stats(events, window_ns):
+        repeat_reads = 0
+        repeat_multi_thread = 0
+        max_window_size = 0
+        max_unique_threads = 0
+        per_node_max_unique = []
+        per_node_max_unique_map = {}
+        per_node_repeat_mt = {}
+        per_node_total = {}
+        per_node_unique_threads = {}
+
+        for node_id, node_events in events.items():
+            node_events.sort(key=lambda x: x[0])
+            start = 0
+            thread_counts = {}
+            node_max_unique = 0
+            node_repeat_mt = 0
+            thread_set = set()
+            for i, (ts, tid) in enumerate(node_events):
+                while start < i and (ts - node_events[start][0] > window_ns):
+                    old_tid = node_events[start][1]
+                    count = thread_counts.get(old_tid, 0)
+                    if count <= 1:
+                        thread_counts.pop(old_tid, None)
+                    else:
+                        thread_counts[old_tid] = count - 1
+                    start += 1
+                if i > start:
+                    repeat_reads += 1
+                    if len(thread_counts) > 0 and not (len(thread_counts) == 1 and tid in thread_counts):
+                        repeat_multi_thread += 1
+                        node_repeat_mt += 1
+                thread_counts[tid] = thread_counts.get(tid, 0) + 1
+                thread_set.add(tid)
+                window_size = i - start + 1
+                if window_size > max_window_size:
+                    max_window_size = window_size
+                if len(thread_counts) > max_unique_threads:
+                    max_unique_threads = len(thread_counts)
+                if len(thread_counts) > node_max_unique:
+                    node_max_unique = len(thread_counts)
+            per_node_max_unique.append(node_max_unique)
+            per_node_max_unique_map[node_id] = node_max_unique
+            per_node_repeat_mt[node_id] = node_repeat_mt
+            per_node_total[node_id] = len(node_events)
+            per_node_unique_threads[node_id] = len(thread_set)
+        return {
+            "repeat_reads": repeat_reads,
+            "repeat_multi_thread": repeat_multi_thread,
+            "max_window_size": max_window_size,
+            "max_unique_threads": max_unique_threads,
+            "per_node_max_unique": per_node_max_unique,
+            "per_node_max_unique_map": per_node_max_unique_map,
+            "per_node_repeat_mt": per_node_repeat_mt,
+            "per_node_total": per_node_total,
+            "per_node_unique_threads": per_node_unique_threads,
+        }
+
+    stats = {
+        "read_trace_total_reads": int(total_reads),
+        "read_trace_unique_nodes": int(len(events_by_node)),
+        "read_trace_cache_hits": int(cache_hits),
+        "read_trace_disk_reads": int(disk_reads),
+        "read_trace_cache_hit_ratio": float(cache_hits / total_reads) if total_reads else 0.0,
+        "read_trace_disk_read_ratio": float(disk_reads / total_reads) if total_reads else 0.0,
+    }
+
+    window_ms_list = [int(v) for v in window_ms_list if str(v).strip()]
+    if not window_ms_list:
+        window_ms_list = [50]
+    stats["read_trace_window_ms_list"] = ",".join(str(v) for v in window_ms_list)
+
+    topk = int(os.environ.get("READ_TRACE_TOPK", "100"))
+    hot_window_ms = window_ms_list[0]
+    hot_window_ns = hot_window_ms * 1_000_000
+    hot_stats = None
+
+    for window_ms in window_ms_list:
+        window_ns = int(window_ms) * 1_000_000
+        window_stats = calc_window_stats(
+            {k: [(ts, tid) for ts, tid, _is_cache_hit in v] for k, v in events_by_node.items()},
+            window_ns,
+        )
+        stats[f"read_trace_window_ms_{window_ms}"] = int(window_ms)
+        stats[f"read_trace_repeat_reads_ms{window_ms}"] = int(window_stats["repeat_reads"])
+        stats[f"read_trace_repeat_ratio_ms{window_ms}"] = (
+            float(window_stats["repeat_reads"] / total_reads) if total_reads else 0.0
+        )
+        stats[f"read_trace_repeat_multi_thread_reads_ms{window_ms}"] = int(window_stats["repeat_multi_thread"])
+        stats[f"read_trace_repeat_multi_thread_ratio_ms{window_ms}"] = (
+            float(window_stats["repeat_multi_thread"] / total_reads) if total_reads else 0.0
+        )
+        stats[f"read_trace_max_window_size_ms{window_ms}"] = int(window_stats["max_window_size"])
+        stats[f"read_trace_max_unique_threads_ms{window_ms}"] = int(window_stats["max_unique_threads"])
+        if window_stats["per_node_max_unique"]:
+            stats[f"read_trace_max_unique_threads_mean_ms{window_ms}"] = float(
+                np.mean(window_stats["per_node_max_unique"])
+            )
+            stats[f"read_trace_max_unique_threads_p95_ms{window_ms}"] = float(
+                np.quantile(window_stats["per_node_max_unique"], 0.95)
+            )
+        if window_ms == hot_window_ms:
+            hot_stats = window_stats
+
+        disk_events = {}
+        for node_id, node_events in events_by_node.items():
+            filtered = [(ts, tid) for ts, tid, is_cache_hit in node_events if not is_cache_hit]
+            if filtered:
+                disk_events[node_id] = filtered
+        disk_total_reads = sum(len(v) for v in disk_events.values())
+        disk_stats = calc_window_stats(disk_events, window_ns)
+        stats[f"read_trace_repeat_reads_disk_ms{window_ms}"] = int(disk_stats["repeat_reads"])
+        stats[f"read_trace_repeat_ratio_disk_ms{window_ms}"] = (
+            float(disk_stats["repeat_reads"] / disk_total_reads) if disk_total_reads else 0.0
+        )
+        stats[f"read_trace_repeat_multi_thread_reads_disk_ms{window_ms}"] = int(disk_stats["repeat_multi_thread"])
+        stats[f"read_trace_repeat_multi_thread_ratio_disk_ms{window_ms}"] = (
+            float(disk_stats["repeat_multi_thread"] / disk_total_reads) if disk_total_reads else 0.0
+        )
+
+    if hot_stats:
+        base_prefix = read_trace_csv[: -len("_read_trace.csv")]
+        hot_rows = []
+        for node_id, total in hot_stats["per_node_total"].items():
+            node_events = events_by_node.get(node_id, [])
+            node_cache_hits = sum(1 for _ts, _tid, is_cache_hit in node_events if is_cache_hit)
+            node_disk_reads = len(node_events) - node_cache_hits
+            hot_rows.append(
+                {
+                    "node_id": int(node_id),
+                    "total_reads": int(total),
+                    "disk_reads": int(node_disk_reads),
+                    "cache_hits": int(node_cache_hits),
+                    "repeat_multi_thread_reads": int(hot_stats["per_node_repeat_mt"].get(node_id, 0)),
+                    "unique_threads": int(hot_stats["per_node_unique_threads"].get(node_id, 0)),
+                    "max_unique_threads_window": int(hot_stats["per_node_max_unique_map"].get(node_id, 0)),
+                }
+            )
+        hot_rows.sort(
+            key=lambda r: (r["repeat_multi_thread_reads"], r["total_reads"], r["unique_threads"]), reverse=True
+        )
+        if hot_rows:
+            hot_path = f"{base_prefix}_read_trace_hot_nodes_{hot_window_ms}ms_top{topk}.csv"
+            with open(hot_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(hot_rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(hot_rows[:topk])
+            topk_total_reads = sum(r["total_reads"] for r in hot_rows[:topk])
+            topk_repeat_mt = sum(r["repeat_multi_thread_reads"] for r in hot_rows[:topk])
+            stats["read_trace_hot_nodes_topk"] = int(topk)
+            stats["read_trace_hot_nodes_read_share"] = float(topk_total_reads / total_reads) if total_reads else 0.0
+            stats["read_trace_hot_nodes_repeat_mt_share"] = (
+                float(topk_repeat_mt / total_reads) if total_reads else 0.0
+            )
+
+    return stats
+
+
 def parse_topk_files(base_prefix, node_counts_csv):
     """
     解析 Top-K 相關輸出檔案，彙整單一 K 的圖統計與覆蓋率。
@@ -400,6 +595,8 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
     else:
         print(f"處理 {len(summary_files)} 個檔案...", end='', flush=True)
     
+    window_env = os.environ.get("READ_TRACE_WINDOWS_MS", os.environ.get("READ_TRACE_WINDOW_MS", "50"))
+    read_trace_window_ms_list = [v.strip() for v in window_env.split(",") if v.strip()]
     all_data = []
     topk_data = []
     row_id = 1
@@ -414,6 +611,7 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
             pidstat_log = f"{base_prefix}_pidstat.log"
             wa_log = f"{base_prefix}_wa.log"
             thread_timeline_csv = f"{base_prefix}_thread_timeline.csv"
+            read_trace_csv = f"{base_prefix}_read_trace.csv"
             topk_rows, topk_summary = parse_topk_files(base_prefix, node_counts_csv)
 
             expanded_stats = parse_expanded_stats(expanded_csv)
@@ -421,6 +619,7 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
             pidstat_stats = parse_pidstat_log(pidstat_log)
             wa_stats = parse_wa_log(wa_log)
             thread_timeline_stats = parse_thread_timeline(thread_timeline_csv)
+            read_trace_stats = parse_read_trace(read_trace_csv, window_ms_list=read_trace_window_ms_list)
 
             extra_cols = {
                 "run_prefix": os.path.basename(base_prefix),
@@ -431,12 +630,14 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
                 "pidstat_log_path": pidstat_log if os.path.isfile(pidstat_log) else "",
                 "wa_log_path": wa_log if os.path.isfile(wa_log) else "",
                 "thread_timeline_path": thread_timeline_csv if os.path.isfile(thread_timeline_csv) else "",
+                "read_trace_path": read_trace_csv if os.path.isfile(read_trace_csv) else "",
             }
             extra_cols.update(expanded_stats)
             extra_cols.update(iostat_stats)
             extra_cols.update(pidstat_stats)
             extra_cols.update(wa_stats)
             extra_cols.update(thread_timeline_stats)
+            extra_cols.update(read_trace_stats)
             extra_cols.update(topk_summary)
 
             # 添加 id 列（在最前面）
@@ -577,6 +778,7 @@ def main():
         "pidstat_log_path",
         "wa_log_path",
         "thread_timeline_path",
+        "read_trace_path",
         "topk_neighbors_files",
         "topk_nodes_files",
         "topk_neighbors_path",

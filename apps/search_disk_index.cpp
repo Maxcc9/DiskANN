@@ -103,7 +103,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       const std::vector<uint32_t> &Lvec, const float fail_if_recall_below,
                       const std::vector<std::string> &query_filters, const bool use_reorder_data = false,
                       const std::string &summary_stats_path = "", const std::string &per_query_stats_path = "",
-                      const std::string &thread_timeline_path = "",
+                      const std::string &thread_timeline_path = "", const std::string &read_trace_path = "",
                       const bool append_search_params = false, const std::string &expanded_nodes_path = "",
                       const uint32_t expanded_nodes_limit = 0, const bool record_expanded_nodes = false)
 {
@@ -169,6 +169,10 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     if (res != 0)
     {
         return res;
+    }
+    if (!read_trace_path.empty())
+    {
+        _pFlashIndex->enable_read_trace(read_trace_path);
     }
 
     std::vector<uint32_t> node_list;
@@ -518,6 +522,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             stats[i].thread_id = (unsigned)omp_get_thread_num();
             const uint32_t os_tid = get_os_thread_id();
             const uint64_t start_ns = get_wall_time_ns();
+            _pFlashIndex->set_thread_query_id(static_cast<uint32_t>(i));
             if (!filtered_search)
             {
                 _pFlashIndex->cached_beam_search(query + (i * query_aligned_dim), recall_at, L,
@@ -924,7 +929,7 @@ int main(int argc, char **argv)
 {
     std::string data_type, dist_fn, index_path_prefix, result_path_prefix, query_file, gt_file, filter_label,
         label_type, query_filters_file, stats_csv_path, summary_stats_path, per_query_stats_path,
-        thread_timeline_path, expanded_nodes_path;
+        thread_timeline_path, read_trace_path, expanded_nodes_path;
     uint32_t num_threads, K, W, num_nodes_to_cache, search_io_limit, expanded_nodes_limit;
     bool record_expanded_nodes = false;
     std::vector<uint32_t> Lvec;
@@ -997,6 +1002,9 @@ int main(int argc, char **argv)
         optional_configs.add_options()(
             "thread_timeline_path", po::value<std::string>(&thread_timeline_path)->default_value(std::string("")),
             "Path to write per-query thread timeline (CSV). If empty, timeline is not written.");
+        optional_configs.add_options()(
+            "read_trace_path", po::value<std::string>(&read_trace_path)->default_value(std::string("")),
+            "Path to write SSD node read trace (CSV). If empty, trace is not written.");
         optional_configs.add_options()(
             "expanded_nodes_path", po::value<std::string>(&expanded_nodes_path)->default_value(std::string("")),
             "Path to write expanded node list CSV (L,beamwidth,query_id,order,node_id)");
@@ -1094,21 +1102,24 @@ int main(int argc, char **argv)
                 return search_disk_index<float, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    summary_stats_path, per_query_stats_path, thread_timeline_path, append_search_params,
+                    summary_stats_path, per_query_stats_path, thread_timeline_path, read_trace_path,
+                    append_search_params,
                     expanded_nodes_path,
                     expanded_nodes_limit, record_expanded_nodes);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    summary_stats_path, per_query_stats_path, thread_timeline_path, append_search_params,
+                    summary_stats_path, per_query_stats_path, thread_timeline_path, read_trace_path,
+                    append_search_params,
                     expanded_nodes_path,
                     expanded_nodes_limit, record_expanded_nodes);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    summary_stats_path, per_query_stats_path, thread_timeline_path, append_search_params,
+                    summary_stats_path, per_query_stats_path, thread_timeline_path, read_trace_path,
+                    append_search_params,
                     expanded_nodes_path,
                     expanded_nodes_limit, record_expanded_nodes);
             else
@@ -1124,6 +1135,7 @@ int main(int argc, char **argv)
                                                 num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                 fail_if_recall_below, query_filters, use_reorder_data,
                                                 summary_stats_path, per_query_stats_path, thread_timeline_path,
+                                                read_trace_path,
                                                 append_search_params,
                                                 expanded_nodes_path, expanded_nodes_limit, record_expanded_nodes);
             else if (data_type == std::string("int8"))
@@ -1131,6 +1143,7 @@ int main(int argc, char **argv)
                                                  num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                  fail_if_recall_below, query_filters, use_reorder_data,
                                                  summary_stats_path, per_query_stats_path, thread_timeline_path,
+                                                 read_trace_path,
                                                  append_search_params,
                                                  expanded_nodes_path, expanded_nodes_limit, record_expanded_nodes);
             else if (data_type == std::string("uint8"))
@@ -1138,6 +1151,7 @@ int main(int argc, char **argv)
                                                   num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                   fail_if_recall_below, query_filters, use_reorder_data,
                                                   summary_stats_path, per_query_stats_path, thread_timeline_path,
+                                                  read_trace_path,
                                                   append_search_params,
                                                   expanded_nodes_path, expanded_nodes_limit, record_expanded_nodes);
             else
