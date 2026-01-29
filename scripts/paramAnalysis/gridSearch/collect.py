@@ -16,10 +16,13 @@ import argparse
 import glob
 import re
 import csv
+import multiprocessing as mp
+import functools
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
 
 
 def find_summary_files(search_dir):
@@ -747,12 +750,15 @@ def compute_window_correlations(read_trace_window_path, latency_window_df, windo
         return {}
 
     def safe_corr(a, b):
+        import warnings
         a_vals = pd.to_numeric(a, errors="coerce")
         b_vals = pd.to_numeric(b, errors="coerce")
         mask = a_vals.notna() & b_vals.notna()
         if mask.sum() < 3:
             return 0.0
-        return float(a_vals[mask].corr(b_vals[mask], method="pearson"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            return float(a_vals[mask].corr(b_vals[mask], method="pearson"))
 
     metrics = {
         "repeat_ratio": "repeat_ratio",
@@ -866,7 +872,111 @@ def parse_topk_files(base_prefix, node_counts_csv):
     return topk_rows, {}
 
 
-def collect_summary_stats(search_dir, output_file=None, verbose=False):
+def _process_one_summary_file(summary_file, read_trace_window_ms_list):
+    """
+    Module-level function to process a single summary_stats.csv file.
+    This must be at module level (not nested) to be pickleable by multiprocessing.Pool.
+    
+    Args:
+        summary_file: Path to _summary_stats.csv file
+        read_trace_window_ms_list: List of window ms values for read trace analysis
+    
+    Returns:
+        Dict with processing results
+    """
+    try:
+        df = pd.read_csv(summary_file)
+        if df.empty:
+            return {
+                "summary_file": summary_file,
+                "rows": [],
+                "cols": list(df.columns),
+                "extra_cols": [],
+                "topk_rows": [],
+            }
+        base_prefix = summary_file[: -len("_summary_stats.csv")]
+        expanded_csv = f"{base_prefix}_expanded_nodes.csv"
+        node_counts_csv = f"{base_prefix}_node_counts.csv"
+        iostat_log = f"{base_prefix}_iostat.log"
+        pidstat_log = f"{base_prefix}_pidstat.log"
+        wa_log = f"{base_prefix}_wa.log"
+        thread_timeline_csv = f"{base_prefix}_thread_timeline.csv"
+        read_trace_csv = f"{base_prefix}_read_trace.csv"
+        topk_rows, topk_summary = parse_topk_files(base_prefix, node_counts_csv)
+
+        expanded_stats = parse_expanded_stats(expanded_csv)
+        iostat_stats = parse_iostat_log(iostat_log)
+        pidstat_stats = parse_pidstat_log(pidstat_log)
+        wa_stats = parse_wa_log(wa_log)
+        thread_timeline_stats = parse_thread_timeline(thread_timeline_csv)
+        read_trace_stats, read_trace_t0_ns = parse_read_trace(
+            read_trace_csv,
+            window_ms_list=read_trace_window_ms_list,
+        )
+
+        extra_cols = {
+            "run_prefix": os.path.basename(base_prefix),
+            "summary_stats_path": summary_file,
+            "expanded_nodes_path": expanded_csv if os.path.isfile(expanded_csv) else "",
+            "node_counts_path": node_counts_csv if os.path.isfile(node_counts_csv) else "",
+            "iostat_log_path": iostat_log if os.path.isfile(iostat_log) else "",
+            "pidstat_log_path": pidstat_log if os.path.isfile(pidstat_log) else "",
+            "wa_log_path": wa_log if os.path.isfile(wa_log) else "",
+            "thread_timeline_path": thread_timeline_csv if os.path.isfile(thread_timeline_csv) else "",
+            "read_trace_path": read_trace_csv if os.path.isfile(read_trace_csv) else "",
+        }
+        extra_cols.update(expanded_stats)
+        extra_cols.update(iostat_stats)
+        extra_cols.update(pidstat_stats)
+        extra_cols.update(wa_stats)
+        extra_cols.update(thread_timeline_stats)
+        extra_cols.update(read_trace_stats)
+        extra_cols.update(topk_summary)
+        if read_trace_t0_ns is not None and os.path.isfile(thread_timeline_csv):
+            _window_latency_paths, window_latency_frames = parse_thread_timeline_windows(
+                thread_timeline_csv,
+                window_ms_list=read_trace_window_ms_list,
+                window_start_ns=read_trace_t0_ns,
+            )
+            window_list_str = read_trace_stats.get(
+                "read_trace_window_ms_list",
+                ",".join(read_trace_window_ms_list),
+            )
+            extra_cols["thread_timeline_window_ms_list"] = window_list_str
+            for window_label, latency_df in window_latency_frames.items():
+                read_trace_window_path = f"{base_prefix}_read_trace_window_{window_label}ms_stats.csv"
+                corr_stats = compute_window_correlations(read_trace_window_path, latency_df, window_label)
+                extra_cols.update(corr_stats)
+
+        rows = df.to_dict(orient="records")
+        extra_keys = list(extra_cols.keys())
+        for row in rows:
+            for key, value in extra_cols.items():
+                row[key] = value
+
+        for row in topk_rows:
+            row["run_prefix"] = os.path.basename(base_prefix)
+            row["summary_stats_path"] = summary_file
+
+        return {
+            "summary_file": summary_file,
+            "rows": rows,
+            "cols": list(df.columns),
+            "extra_cols": extra_keys,
+            "topk_rows": topk_rows,
+        }
+    except Exception as e:
+        return {
+            "summary_file": summary_file,
+            "error": str(e),
+            "rows": [],
+            "cols": [],
+            "extra_cols": [],
+            "topk_rows": [],
+        }
+
+
+def collect_summary_stats(search_dir, output_file=None, verbose=False, workers=None):
     """
     蒐集所有 summary_stats.csv 並彙總到一個檔案
     
@@ -874,6 +984,7 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
         search_dir: search 輸出目錄
     output_file: 彙總輸出檔案路徑 (為空則不寫檔)
         verbose: 是否顯示詳細資訊
+        workers: Number of worker processes for parallelization (None = auto-detect from COLLECT_WORKERS env var)
     
     Returns:
         combined_df, topk_data
@@ -885,99 +996,76 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
         print(f"警告: 在 {search_dir} 內找不到任何 *_summary_stats.csv 檔案", file=sys.stderr)
         return None, []
     
-    if verbose:
-        print(f"找到 {len(summary_files)} 個 summary_stats.csv 檔案")
-    else:
-        print(f"處理 {len(summary_files)} 個檔案...", end='', flush=True)
-    
     window_env = os.environ.get("READ_TRACE_WINDOWS_MS", os.environ.get("READ_TRACE_WINDOW_MS", "0.5"))
     read_trace_window_ms_list = [v.strip() for v in window_env.split(",") if v.strip()]
+    
+    # Determine number of workers
+    if workers is None:
+        workers_env = os.environ.get("COLLECT_WORKERS", "")
+        if workers_env.strip().isdigit():
+            workers = int(workers_env.strip())
+        else:
+            workers = 1
+    
+    if verbose:
+        print(f"找到 {len(summary_files)} 個 summary_stats.csv 檔案")
+        if workers > 1:
+            print(f"使用 {workers} 個 worker 進行平行處理...")
+    
+    # Process files with multiprocessing if workers > 1
+    if workers > 1:
+        # Use fork if available (faster), otherwise use spawn (more compatible but slower)
+        ctx = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context("spawn")
+        with ctx.Pool(processes=workers) as pool:
+            # Use functools.partial to bind read_trace_window_ms_list to each call
+            process_func = functools.partial(_process_one_summary_file, 
+                                            read_trace_window_ms_list=read_trace_window_ms_list)
+            # Use tqdm progress bar
+            results = list(tqdm(
+                pool.imap(process_func, summary_files),
+                total=len(summary_files),
+                desc="處理檔案",
+                unit="file",
+                disable=verbose
+            ))
+    else:
+        # Single-threaded with progress bar
+        results = [
+            _process_one_summary_file(sf, read_trace_window_ms_list)
+            for sf in tqdm(summary_files, desc="處理檔案", unit="file", disable=verbose)
+        ]
+    
     all_data = []
     topk_data = []
     row_id = 1
+    failed_count = 0
     
-    for summary_file in summary_files:
-        try:
-            df = pd.read_csv(summary_file)
-            base_prefix = summary_file[: -len("_summary_stats.csv")]
-            expanded_csv = f"{base_prefix}_expanded_nodes.csv"
-            node_counts_csv = f"{base_prefix}_node_counts.csv"
-            iostat_log = f"{base_prefix}_iostat.log"
-            pidstat_log = f"{base_prefix}_pidstat.log"
-            wa_log = f"{base_prefix}_wa.log"
-            thread_timeline_csv = f"{base_prefix}_thread_timeline.csv"
-            read_trace_csv = f"{base_prefix}_read_trace.csv"
-            topk_rows, topk_summary = parse_topk_files(base_prefix, node_counts_csv)
-
-            expanded_stats = parse_expanded_stats(expanded_csv)
-            iostat_stats = parse_iostat_log(iostat_log)
-            pidstat_stats = parse_pidstat_log(pidstat_log)
-            wa_stats = parse_wa_log(wa_log)
-            thread_timeline_stats = parse_thread_timeline(thread_timeline_csv)
-            read_trace_stats, read_trace_t0_ns = parse_read_trace(
-                read_trace_csv,
-                window_ms_list=read_trace_window_ms_list,
-            )
-
-            extra_cols = {
-                "run_prefix": os.path.basename(base_prefix),
-                "summary_stats_path": summary_file,
-                "expanded_nodes_path": expanded_csv if os.path.isfile(expanded_csv) else "",
-                "node_counts_path": node_counts_csv if os.path.isfile(node_counts_csv) else "",
-                "iostat_log_path": iostat_log if os.path.isfile(iostat_log) else "",
-                "pidstat_log_path": pidstat_log if os.path.isfile(pidstat_log) else "",
-                "wa_log_path": wa_log if os.path.isfile(wa_log) else "",
-                "thread_timeline_path": thread_timeline_csv if os.path.isfile(thread_timeline_csv) else "",
-                "read_trace_path": read_trace_csv if os.path.isfile(read_trace_csv) else "",
-            }
-            extra_cols.update(expanded_stats)
-            extra_cols.update(iostat_stats)
-            extra_cols.update(pidstat_stats)
-            extra_cols.update(wa_stats)
-            extra_cols.update(thread_timeline_stats)
-            extra_cols.update(read_trace_stats)
-            extra_cols.update(topk_summary)
-            if read_trace_t0_ns is not None and os.path.isfile(thread_timeline_csv):
-                window_latency_paths, window_latency_frames = parse_thread_timeline_windows(
-                    thread_timeline_csv,
-                    window_ms_list=read_trace_window_ms_list,
-                    window_start_ns=read_trace_t0_ns,
-                )
-                window_list_str = read_trace_stats.get(
-                    "read_trace_window_ms_list",
-                    ",".join(read_trace_window_ms_list),
-                )
-                extra_cols["thread_timeline_window_ms_list"] = window_list_str
-                for window_label, latency_df in window_latency_frames.items():
-                    read_trace_window_path = f"{base_prefix}_read_trace_window_{window_label}ms_stats.csv"
-                    corr_stats = compute_window_correlations(read_trace_window_path, latency_df, window_label)
-                    extra_cols.update(corr_stats)
-
-            # 添加 id 列（在最前面）
-            ids = list(range(row_id, row_id + len(df)))
-            df.insert(0, "id", ids)
-            row_id += len(df)
-
-            if extra_cols:
-                extra_df = pd.DataFrame({key: [value] * len(df) for key, value in extra_cols.items()})
-                df = pd.concat([df, extra_df], axis=1)
-            
-            all_data.append(df)
-            index_name = extract_index_info(summary_file)
+    for res in results:
+        if res.get("error"):
+            failed_count += 1
             if verbose:
-                print(f"  ✓ 已讀取: {summary_file} (index: {index_name}, 行數: {len(df)})")
-
-            for row in topk_rows:
-                row["run_prefix"] = os.path.basename(base_prefix)
-                row["summary_stats_path"] = summary_file
-                topk_data.append(row)
-            
-        except Exception as e:
-            print(f"  ✗ 讀取失敗: {summary_file} - {e}", file=sys.stderr)
+                print(f"  ✗ 讀取失敗: {res['summary_file']} - {res['error']}", file=sys.stderr)
             continue
-    
-    if not verbose:
-        print(" 完成")
+        
+        rows = res.get("rows", [])
+        if not rows:
+            continue
+        
+        # Convert rows back to DataFrame
+        df = pd.DataFrame(rows)
+        base_prefix = res["summary_file"][: -len("_summary_stats.csv")]
+        
+        # Add id column
+        ids = list(range(row_id, row_id + len(df)))
+        df.insert(0, "id", ids)
+        row_id += len(df)
+        
+        all_data.append(df)
+        if verbose:
+            index_name = extract_index_info(res["summary_file"])
+            print(f"  ✓ 已讀取: {res['summary_file']} (index: {index_name}, 行數: {len(df)})")
+
+        topk_data.extend(res.get("topk_rows", []))
     
     if not all_data:
         print("錯誤: 沒有成功讀取任何檔案", file=sys.stderr)
@@ -995,7 +1083,10 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False):
     # 儲存到輸出檔案
     if output_file:
         combined_df.to_csv(output_file, index=False)
-        print(f"✓ 彙總完成: {output_file} ({len(combined_df)} 行, {len(combined_df.columns)} 列)")
+        success_msg = f"✓ 彙總完成: {output_file} ({len(combined_df)} 行, {len(combined_df.columns)} 列)"
+        if failed_count > 0:
+            success_msg += f" (失敗: {failed_count})"
+        print(success_msg)
     
     return combined_df, topk_data
 
@@ -1018,6 +1109,17 @@ def main():
         "-v", "--verbose",
         action="store_true",
         help="顯示詳細資訊"
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="用於平行化的 worker 數量 (預設: 1，或由 COLLECT_WORKERS 環境變數決定)"
+    )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="運行完成後清理所有中間統計檔案"
     )
     
     args = parser.parse_args()
@@ -1054,7 +1156,7 @@ def main():
         print("-" * 60)
     
     # 執行蒐集
-    summary_df, topk_data = collect_summary_stats(search_dir, output_file=None, verbose=args.verbose)
+    summary_df, topk_data = collect_summary_stats(search_dir, output_file=None, verbose=args.verbose, workers=args.workers)
     if summary_df is None or summary_df.empty:
         sys.exit(1)
 
@@ -1127,9 +1229,40 @@ def main():
 
     if drop_iostat_cols:
         final_df = final_df.drop(columns=drop_iostat_cols)
+        if args.verbose:
+            print(f"  移除全零 iostat 欄位: {len(drop_iostat_cols)} 個")
 
     final_df.to_csv(output_file, index=False)
     print(f"✓ 完整彙總：{output_file} ({len(final_df)} 行, {len(final_df.columns)} 列)")
+    
+    # 清理中間檔案（如果需要）
+    if args.cleanup:
+        if args.verbose:
+            print("\n清理中間檔案...")
+        
+        cleanup_count = 0
+        # 找所有中間統計檔案
+        cleanup_files = []
+        for root, dirs, files in os.walk(search_dir):
+            for file in files:
+                if file.endswith("_read_trace_window_") or "_read_trace_window_" in file and file.endswith("ms_stats.csv"):
+                    cleanup_files.append(os.path.join(root, file))
+                elif file.endswith("_node_stats.csv"):
+                    cleanup_files.append(os.path.join(root, file))
+        
+        # 使用進度條刪除檔案
+        for file_path in tqdm(cleanup_files, desc="清理中間檔案", unit="file", disable=args.verbose):
+            try:
+                os.remove(file_path)
+                cleanup_count += 1
+                if args.verbose:
+                    print(f"  已刪除: {file_path}")
+            except Exception as e:
+                if args.verbose:
+                    print(f"  無法刪除 {file_path}: {e}", file=sys.stderr)
+        
+        if cleanup_count > 0:
+            print(f"✓ 清理完成：已刪除 {cleanup_count} 個中間檔案")
     
     # 顯示統計資訊
     if args.verbose:
