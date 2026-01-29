@@ -11,6 +11,26 @@
 
 set -euo pipefail
 
+# 記錄所有背景進程 PID，確保清理
+declare -a BG_PIDS=()
+
+# 清理函數：終止所有背景進程（包括子進程）
+cleanup_bg_processes() {
+    for pid in "${BG_PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            # 先嘗試溫和終止 (SIGTERM)
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 0.1
+            # 如果還活著，強制終止 (SIGKILL)
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+    BG_PIDS=()
+    
+    # 額外清理：終止任何可能的孤立 iostat/pidstat/mpstat 進程
+    pkill -P $$ -f "iostat|pidstat|mpstat" 2>/dev/null || true
+}
+
 usage() {
     cat <<'USAGE'
 用法:
@@ -465,6 +485,7 @@ run_search() {
                 iostat -x "$IOSTAT_INTERVAL" > "${result_prefix}_iostat.log" 2>&1 &
             fi
             iostat_pid=$!
+            BG_PIDS+=("$iostat_pid")
         fi
     fi
     
@@ -473,35 +494,55 @@ run_search() {
         # 背景執行搜尋並監測
         "${cmd[@]}" > "$log_file" 2>&1 &
         search_pid=$!
+        BG_PIDS+=("$search_pid")
         
         [[ "$ENABLE_PIDSTAT" == "1" ]] && command -v pidstat >/dev/null 2>&1 && { 
             pidstat -t -u -d -r -w -p "$search_pid" "$PIDSTAT_INTERVAL" > "${result_prefix}_pidstat.log" 2>&1 &
             pidstat_pid=$!
+            BG_PIDS+=("$pidstat_pid")
         }
         
         [[ "$ENABLE_WA_LOG" == "1" ]] && command -v mpstat >/dev/null 2>&1 && { 
             mpstat -P ALL "$WA_INTERVAL" > "${result_prefix}_wa.log" 2>&1 &
             wa_pid=$!
+            BG_PIDS+=("$wa_pid")
         }
         
         # 等待搜尋完成
         wait "$search_pid"
         local ret=$?
         
-        # 終止監測程序
-        [[ -n "$pidstat_pid" ]] && kill "$pidstat_pid" 2>/dev/null || true
-        [[ -n "$wa_pid" ]] && kill "$wa_pid" 2>/dev/null || true
-        [[ -n "$iostat_pid" ]] && kill "$iostat_pid" 2>/dev/null || true
+        # 終止監測程序（先移除陣列中的 PID）
+        local i
+        for ((i=0; i<${#BG_PIDS[@]}; i++)); do
+            [[ "${BG_PIDS[$i]}" == "$search_pid" || "${BG_PIDS[$i]}" == "$pidstat_pid" || "${BG_PIDS[$i]}" == "$wa_pid" ]] && unset 'BG_PIDS[$i]'
+        done
+        BG_PIDS=("${BG_PIDS[@]}")  # 重建陣列去除空洞
+        
+        # 用 SIGTERM 先溫和終止
+        [[ -n "$pidstat_pid" ]] && kill -TERM "$pidstat_pid" 2>/dev/null || true
+        [[ -n "$wa_pid" ]] && kill -TERM "$wa_pid" 2>/dev/null || true
+        [[ -n "$iostat_pid" ]] && kill -TERM "$iostat_pid" 2>/dev/null || true
+        
+        # 等待一下讓進程優雅結束
+        sleep 0.2
+        
+        # 確保強制終止任何殘留進程
+        [[ -n "$pidstat_pid" ]] && kill -KILL "$pidstat_pid" 2>/dev/null || true
+        [[ -n "$wa_pid" ]] && kill -KILL "$wa_pid" 2>/dev/null || true
+        [[ -n "$iostat_pid" ]] && kill -KILL "$iostat_pid" 2>/dev/null || true
         
         [[ $ret -ne 0 ]] && { echo "✗ 失敗，見 $log_file"; return 1; }
     else
         # 直接執行搜尋（前台）
         if ! "${cmd[@]}" > "$log_file" 2>&1; then
-            [[ -n "$iostat_pid" ]] && kill "$iostat_pid" 2>/dev/null || true
+            [[ -n "$iostat_pid" ]] && kill -KILL "$iostat_pid" 2>/dev/null || true
             echo "✗ 失敗，見 $log_file"
             return 1
         fi
-        [[ -n "$iostat_pid" ]] && kill "$iostat_pid" 2>/dev/null || true
+        [[ -n "$iostat_pid" ]] && kill -TERM "$iostat_pid" 2>/dev/null || true
+        sleep 0.1
+        [[ -n "$iostat_pid" ]] && kill -KILL "$iostat_pid" 2>/dev/null || true
     fi
     
     echo "✓ 完成"
@@ -576,5 +617,8 @@ echo ""
 echo "=========================================="
 echo "批次搜尋完成，結果位於: $OUTPUT_DIR"
 echo "=========================================="
+
+# 設定 EXIT 陷阱以確保清理
+trap cleanup_bg_processes EXIT
 
 exit $fail
