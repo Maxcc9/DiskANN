@@ -7,13 +7,15 @@
 - `tests/` Boost unit tests; datasets under `test_data/`, golden outputs in `test_run/`.
 - `scripts/`, `workflows/` reproducible scenarios (SSD, filtered, dynamic, param analysis grid search).
 - `scripts/paramAnalysis/gridSearch/` grid-search tooling for build/search batches and offline analysis.
-- Output naming: search artifacts use prefix `S{search_id}_{index_tag}_W{W}_L{L}_K{K}_cache{cache}_T{threads}`.
+- Output naming: search artifacts use prefix `S{search_id}_{index_tag}_W{W}_L{L}_K{K}_cache{cache}_T{threads}` (with `_{repeat_idx}` suffix for multiple repeats).
 - Top-K analysis outputs: `*_topk{K}_nodes.txt`, `*_topk{K}_neighbors.csv`.
 - Aggregation outputs: `outputFiles/analyze/collected_all_{search_dir}_{timestamp}.csv`.
 - Analysis reports: `outputFiles/analyze/<REPORT_PREFIX>/figures/`, `outputFiles/analyze/<REPORT_PREFIX>/tables/`, `outputFiles/analyze/<REPORT_PREFIX>/summary.md`.
 - Notebook helper: `scripts/paramAnalysis/gridSearch/analysis/run_all_notebooks.py` (runs 00~06 notebooks).
 - Batch tooling supports `EXPERIMENT_TAG` to create per-run subfolders under `outputFiles/build` and `outputFiles/search`.
-- `build_batch.sh` and `search_batch.sh` require named args (`--build-csv`, `--search-csv`, `--dataset`, `--max-parallel`).
+- `build_batch.sh` and `search_batch.sh` use named args: `--max-parallel`, `--repeat-count` (search only), `--clean`.
+  Supports `EXPERIMENT_TAG` for auto-config discovery; `--dataset` overrides default DATASET inference.
+  Supports `REPEAT_COUNT` / `REPEAT_COOLDOWN_SECONDS` / `REPEAT_CLEAR_CACHE` for multi-trial robustness analysis.
 - `rust/` Rust crates; follow Cargo workflows.
 
 ## Build, Test, and Development Commands
@@ -37,7 +39,7 @@
 - Python tests `test_*.py` with `unittest` + `numpy.testing`.
 - Rust tests live in each crate; keep `rust/cmd_drivers/` examples current.
 - Update `workflows/*.md` when adding scenarios; stash catalogs in `test_run/`.
-- For param analysis updates, keep `workflows/param_analysis_gridsearch.md` in sync.
+- For param analysis updates, keep `workflows/param_analysis_runbook.md` in sync.
 - For param analysis outputs, `collect.py` writes a single `collected_all_*` file; notebooks read that.
 
 ## Commit & Pull Request Guidelines
@@ -48,6 +50,9 @@
 ## Security & Configuration Tips
 - Review `SECURITY.md` before reporting vulnerabilities; scrub sensitive dataset paths from logs.
 - Document new env knobs (e.g., `OMP_PATH`, memory budgets) in the relevant workflow guide with conservative defaults.
+
+# conda 環境
+- 請自動切到 diskann
 
 ## 回應語言
 - 用繁體中文回覆使用者
