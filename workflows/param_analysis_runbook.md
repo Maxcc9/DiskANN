@@ -188,9 +188,9 @@ EXPERIMENT_TAG=sift01 python gen_build_configs.py
 用途：依 `inputFiles/{EXPERIMENT_TAG}/build_configs.csv` 批次建置索引，輸出到獨立實驗資料夾。設定 `EXPERIMENT_TAG` 即自動配對配置檔案與推斷 DATASET。
 
 ```bash
-EXPERIMENT_TAG=siftsmall01 NUM_THREADS=$(nproc) bash build_batch.sh --clean
+EXPERIMENT_TAG=siftsmall01 NUM_THREADS=$(nproc) bash build_batch.sh --dataset siftsmall --clean
 
-EXPERIMENT_TAG=sift01 NUM_THREADS=$(nproc) bash build_batch.sh --clean
+EXPERIMENT_TAG=sift01 NUM_THREADS=$(nproc) bash build_batch.sh --dataset sift --clean
 ```
 
 若需覆寫 DATASET（使用不同的資料集名稱）：
