@@ -7,7 +7,7 @@ import argparse
 SEARCH_W_LIST = [1, 2, 4, 8, 16]
 ALPHA_LIST = [2, 3, 4]          # search_L = alpha * search_W
 CACHE_RATIO_LIST = [0, 0.01, 0.02, 0.05, 0.10]
-THREAD_LIST = [1, 4]            # 會自動補 max_cores
+THREAD_LIST = [1, 2, 4, 8, 16]            # 會自動補 max_cores
 K_LIST = [10, 100]
 
 def main():
@@ -19,20 +19,27 @@ def main():
     dataset_size = args.dataset_size
     max_cores = args.max_cores
 
-    thread_list = THREAD_LIST + [max_cores]
+    # preserve order while avoiding duplicates (e.g., max_cores already in THREAD_LIST)
+    thread_list = list(dict.fromkeys(THREAD_LIST + [max_cores]))
 
     rows = []
+    seen = set()
     sid = 1
 
     for W in SEARCH_W_LIST:
-        for alpha in ALPHA_LIST:
-            for K in K_LIST:
-                L = max(alpha * W, K)
+        for K in K_LIST:
+            # L is derived from alpha and W, but only L is emitted; de-dup L values
+            l_list = sorted({max(alpha * W, K) for alpha in ALPHA_LIST})
+            for L in l_list:
 
                 for cache_ratio in CACHE_RATIO_LIST:
                     cache_nodes = int(cache_ratio * dataset_size)
 
                     for T in thread_list:
+                        key = (W, L, K, cache_nodes, T)
+                        if key in seen:
+                            continue
+                        seen.add(key)
                         rows.append({
                             "search_id": f"S{sid}",
                             "search_W": W,
@@ -43,14 +50,15 @@ def main():
                         })
                         sid += 1
 
-    # 讀取 EXPERIMENT_TAG，決定輸出資料夾
+    # 讀取 EXPERIMENT_TAG，決定輸出資料夾（固定輸出到本腳本下的 inputFiles）
+    base_dir = os.path.join(os.path.dirname(__file__), "inputFiles")
     experiment_tag = os.environ.get("EXPERIMENT_TAG", "")
     if experiment_tag:
-        output_dir = f"./inputFiles/{experiment_tag}"
-        output_file = f"{output_dir}/search_configs.csv"
+        output_dir = os.path.join(base_dir, experiment_tag)
+        output_file = os.path.join(output_dir, "search_configs.csv")
     else:
-        output_dir = "./inputFiles"
-        output_file = "./inputFiles/search_configs.csv"
+        output_dir = base_dir
+        output_file = os.path.join(base_dir, "search_configs.csv")
 
     # Auto-create directory if not exists
     os.makedirs(output_dir, exist_ok=True)

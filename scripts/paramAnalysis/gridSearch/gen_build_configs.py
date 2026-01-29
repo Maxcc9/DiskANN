@@ -20,6 +20,7 @@ SELECTED = {
 
 def main():
     rows = []
+    seen = set()
     build_id = 1
 
     for R in BUILD_R_LIST:
@@ -29,6 +30,10 @@ def main():
             if SELECTED and (R, L) not in SELECTED:
                 continue
 
+            key = (R, L)
+            if key in seen:
+                continue
+            seen.add(key)
             rows.append({
                 "build_id": f"B{build_id}",
                 "build_R": R,
@@ -36,14 +41,15 @@ def main():
             })
             build_id += 1
 
-    # 讀取 EXPERIMENT_TAG，決定輸出資料夾
+    # 讀取 EXPERIMENT_TAG，決定輸出資料夾（固定輸出到本腳本下的 inputFiles）
+    base_dir = os.path.join(os.path.dirname(__file__), "inputFiles")
     experiment_tag = os.environ.get("EXPERIMENT_TAG", "")
     if experiment_tag:
-        output_dir = f"./inputFiles/{experiment_tag}"
-        output_file = f"{output_dir}/build_configs.csv"
+        output_dir = os.path.join(base_dir, experiment_tag)
+        output_file = os.path.join(output_dir, "build_configs.csv")
     else:
-        output_dir = "./inputFiles"
-        output_file = "./inputFiles/build_configs.csv"
+        output_dir = base_dir
+        output_file = os.path.join(base_dir, "build_configs.csv")
 
     # Auto-create directory if not exists
     os.makedirs(output_dir, exist_ok=True)
