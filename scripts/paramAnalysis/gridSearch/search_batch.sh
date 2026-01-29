@@ -1,55 +1,94 @@
 #!/usr/bin/env bash
-# 依 ./inputFiles/search_configs.csv 批次對 ./outputFiles/build 內的索引進行搜尋。
+# 依 ./inputFiles/search_configs.csv 批次對 ./outputFiles/build 內的索引進行搜尋
+# 核心邏輯：每次搜尋都是獨立單位，執行前依序進行：
+#   1) 清除系統快取（drop_caches）
+#   2) 檢測 NVMe 溫度，若超過閾值則等待
+#   3) 執行實際搜尋
+#   4) 收集監測指標（iostat/pidstat/mpstat）
+#
 # 必要輸入：./inputFiles/search_configs.csv (search_id,search_W,search_L,search_cache,search_thread)
 # 輸出位置: ./outputFiles/search/
-# 可用 DRY_RUN=1 先驗證指令。
 
 set -euo pipefail
 
 usage() {
     cat <<'USAGE'
 用法:
-  bash search_batch.sh [--search-csv PATH] [--dataset NAME] [--max-parallel N] [--clean]
+  bash search_batch.sh [--search-csv PATH] [--dataset NAME] [--max-parallel N] [--repeat-count N] [--clean]
 
-參數:
-  --search-csv PATH
-  --dataset NAME
-  --max-parallel N
-  --clean          清除舊的實驗搜尋結果（重新開始），預設不清除
+必要參數:
+  --search-csv PATH     搜尋配置 CSV 路徑（預設：inputFiles/search_configs.csv 或 inputFiles/{EXPERIMENT_TAG}/search_configs.csv）
+  --dataset NAME        資料集名稱（預設：自動推斷）
+  --max-parallel N      最大並行搜尋數（預設：4，若啟用溫度控制強制改為 1）
+  --repeat-count N      每組參數重複執行次數（預設：1）
+  --clean               清除舊搜尋結果（預設：保留）
 
-環境變數可覆寫:
-  BUILD_DIR, OUTPUT_DIR, DATA_TYPE, DIST_FN
-  QUERY_FILE, GT_FILE, SEARCH_IO_LIMIT, THREAD_OVERRIDE
-  EXPERIMENT_TAG 追加到 OUTPUT_DIR，且在 BUILD_DIR 使用預設值時同步追加
-  EXTRA_ARGS 可補充 search_disk_index 的其他參數
-  ENABLE_IOSTAT=1 時為每筆樣本記錄 iostat
-  IOSTAT_INTERVAL=1, IOSTAT_DEVICE, IOSTAT_DATA_PATH
-  ENABLE_PIDSTAT=1 時為每筆樣本記錄 pidstat (per-thread)
-  PIDSTAT_INTERVAL=1
-  ENABLE_WA_LOG=1 時為每筆樣本記錄 mpstat (CPU wa)
-  WA_INTERVAL=1
-  ENABLE_THREAD_TIMELINE=1 時輸出 per-query thread timeline CSV
-  ENABLE_READ_TRACE=1 時輸出 SSD node read trace CSV
-  ENABLE_EXPANDED_NODES=1 時為每筆樣本輸出 expanded_nodes CSV
-  EXPANDED_NODES_LIMIT=0 (0 = unlimited)
-  SLEEP_SECONDS=0 每筆搜尋結束後 sleep 秒數（可用於降載）
-  COOLDOWN_TEMP_C=60 設定後：每筆搜尋開始前確認 NVMe 溫度低於此值，並強制改為單工
-  COOLDOWN_CHECK_INTERVAL=15 檢查間隔秒數
-  TEMP_DEVICE=/dev/nvme0 供溫度檢查使用
-  NVME_USE_SUDO=0 設為 1 時以 sudo 讀取 nvme smart-log（若無法直接讀取）
-  CLEAN=1 時清除舊的實驗搜尋結果（同 --clean）
-  DRY_RUN=1 時僅印出指令不執行 search_disk_index
+環境變數:
+  實驗配置:
+    EXPERIMENT_TAG        實驗名稱（自動推斷 BUILD_DIR/OUTPUT_DIR/DATASET/TEMP_DEVICE）
+    BUILD_DIR             索引輸出資料夾
+    OUTPUT_DIR            搜尋結果輸出資料夾
+    DATASET               資料集名稱
+    
+  搜尋參數:
+    DATA_TYPE             數據類型（預設：float）
+    DIST_FN               距離函數（預設：l2）
+    QUERY_FILE            查詢文件路徑
+    GT_FILE               基準真值文件路徑
+    SEARCH_IO_LIMIT       搜尋 I/O 限制
+    THREAD_OVERRIDE       覆寫執行緒數
+    K_OVERRIDE            覆寫 K 值
+    EXTRA_ARGS            額外命令行參數
+    SLEEP_SECONDS         每筆搜尋後 sleep 秒數（預設：0）
+    
+  快取與溫度控制（每次搜尋前執行）:
+    CACHE_CLEAR_ENABLED   是否清除系統快取（預設：1）
+    COOLDOWN_TEMP_C       NVMe 溫度閾值，單位°C（預設：60，0 表示禁用）
+    COOLDOWN_CHECK_INTERVAL 溫度檢測間隔秒數（預設：15）
+    TEMP_DEVICE           NVMe 設備路徑（預設：自動推斷）
+    
+  監測開關:
+    ENABLE_IOSTAT         啟用 iostat 記錄（預設：1）
+    ENABLE_PIDSTAT        啟用 pidstat 記錄（預設：1）
+    ENABLE_WA_LOG         啟用 mpstat 記錄（預設：1）
+    ENABLE_THREAD_TIMELINE    啟用線程時間軸（預設：1）
+    ENABLE_READ_TRACE     啟用讀取追蹤（預設：1）
+    ENABLE_EXPANDED_NODES 啟用展開節點記錄（預設：1）
+    ENABLE_SUMMARY_STATS  啟用摘要統計（預設：1）
+    ENABLE_PER_QUERY_STATS    啟用單查詢統計（預設：0）
+    IOSTAT_INTERVAL       iostat 記錄間隔秒數（預設：1）
+    PIDSTAT_INTERVAL      pidstat 記錄間隔秒數（預設：1）
+    WA_INTERVAL           mpstat 記錄間隔秒數（預設：1）
+    EXPANDED_NODES_LIMIT  展開節點記錄限制（預設：0）
+    
+  診斷模式:
+    DRY_RUN               設置 1 以只列印命令不執行（預設：0）
+
+使用範例:
+  # 單次搜尋（自動檢測溫度，若 NVMe > 60°C 則等待）
+  EXPERIMENT_TAG=sift01 bash search_batch.sh --clean
+
+  # 多次重複搜尋（確保統計穩定性，每次搜尋前清除快取）
+  EXPERIMENT_TAG=sift01 bash search_batch.sh --repeat-count 3 --clean
+
+  # 自訂溫度閾值
+  EXPERIMENT_TAG=sift01 COOLDOWN_TEMP_C=50 bash search_batch.sh --repeat-count 5 --clean
 USAGE
 }
 
+# ==================== 命令行參數解析 ====================
+
 [[ ${1:-} == "-h" || ${1:-} == "--help" ]] && { usage; exit 0; }
 
+# 基礎路徑設定
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISKANN_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 APPS_DIR="${DISKANN_ROOT}/build/apps"
 SEARCH_BIN="${APPS_DIR}/search_disk_index"
 
-# 初始化預設值（若設定 EXPERIMENT_TAG，則嘗試從對應資料夾自動讀取）
+# ==================== 參數初始化 ====================
+
+# 實驗標籤與配置路徑
 EXPERIMENT_TAG="${EXPERIMENT_TAG:-}"
 if [[ -n "$EXPERIMENT_TAG" ]]; then
     SEARCH_CSV="${SCRIPT_DIR}/inputFiles/${EXPERIMENT_TAG}/search_configs.csv"
@@ -57,55 +96,31 @@ else
     SEARCH_CSV="${SCRIPT_DIR}/inputFiles/search_configs.csv"
 fi
 
-# 初始化 DATASET（在命令行参数前）
+# 批次控制
 DATASET="${DATASET:-}"
-MAX_PARALLEL="4"
+MAX_PARALLEL="${MAX_PARALLEL:-4}"
+REPEAT_COUNT="${REPEAT_COUNT:-1}"
 CLEAN="${CLEAN:-0}"
 
-# Optional named args
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --search-csv)
-            SEARCH_CSV="$2"
-            shift 2
-            ;;
-        --dataset)
-            DATASET="$2"
-            shift 2
-            ;;
-        --max-parallel)
-            MAX_PARALLEL="$2"
-            shift 2
-            ;;
-        --clean)
-            CLEAN="1"
-            shift
-            ;;
-        --)
-            shift
-            break
-            ;;
-        -*)
-            echo "ERROR: 未知參數 $1" >&2
-            exit 1
-            ;;
-        *)
-            echo "ERROR: 不支援位置參數，請使用 --search-csv/--dataset/--max-parallel/--clean" >&2
-            exit 1
-            ;;
-    esac
-done
-
-# 自動推斷 DATASET（命令行參數解析後）：優先順序為 --dataset 參數 > EXPERIMENT_TAG > 預設為空
-if [[ -z "$DATASET" ]]; then
-    DATASET="${EXPERIMENT_TAG:-}"
+# 輸出與資料集
+if [[ -z "${BUILD_DIR+x}" ]]; then
+    BUILD_DIR="${SCRIPT_DIR}/outputFiles/build"
+    [[ -n "$EXPERIMENT_TAG" ]] && BUILD_DIR="${BUILD_DIR}/${EXPERIMENT_TAG}"
 fi
-DRY_RUN="${DRY_RUN:-0}"
+OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/outputFiles/search}"
+[[ -n "$EXPERIMENT_TAG" ]] && OUTPUT_DIR="${OUTPUT_DIR}/${EXPERIMENT_TAG}"
+[[ -z "$DATASET" ]] && DATASET="${EXPERIMENT_TAG:-}"
+
+# 搜尋參數與監測
 DATA_TYPE="${DATA_TYPE:-float}"
 DIST_FN="${DIST_FN:-l2}"
 SEARCH_IO_LIMIT="${SEARCH_IO_LIMIT:-}"
 THREAD_OVERRIDE="${THREAD_OVERRIDE:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+K_OVERRIDE="${K_OVERRIDE:-}"
+SLEEP_SECONDS="${SLEEP_SECONDS:-0}"
+
+# 監測開關
 ENABLE_IOSTAT="${ENABLE_IOSTAT:-1}"
 IOSTAT_INTERVAL="${IOSTAT_INTERVAL:-1}"
 IOSTAT_DEVICE="${IOSTAT_DEVICE:-}"
@@ -118,229 +133,242 @@ ENABLE_THREAD_TIMELINE="${ENABLE_THREAD_TIMELINE:-1}"
 ENABLE_READ_TRACE="${ENABLE_READ_TRACE:-1}"
 ENABLE_EXPANDED_NODES="${ENABLE_EXPANDED_NODES:-1}"
 EXPANDED_NODES_LIMIT="${EXPANDED_NODES_LIMIT:-0}"
-K_OVERRIDE="${K_OVERRIDE:-}"
-SLEEP_SECONDS="${SLEEP_SECONDS:-0}"
+ENABLE_SUMMARY_STATS="${ENABLE_SUMMARY_STATS:-1}"
+ENABLE_PER_QUERY_STATS="${ENABLE_PER_QUERY_STATS:-0}"
+
+# 溫度與冷卻控制
 COOLDOWN_TEMP_C="${COOLDOWN_TEMP_C:-60}"
 COOLDOWN_CHECK_INTERVAL="${COOLDOWN_CHECK_INTERVAL:-15}"
-TEMP_DEVICE="${TEMP_DEVICE:-/dev/nvme0}"
-NVME_USE_SUDO="${NVME_USE_SUDO:-0}"
-COOLDOWN_ENABLED=0
+TEMP_DEVICE="${TEMP_DEVICE:-}"
 
-if [[ -z "${BUILD_DIR+x}" ]]; then
-    BUILD_DIR_DEFAULT=1
-    BUILD_DIR="${SCRIPT_DIR}/outputFiles/build"
-else
-    BUILD_DIR_DEFAULT=0
-    BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/outputFiles/build}"
-fi
-OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/outputFiles/search}"
-EXPERIMENT_TAG="${EXPERIMENT_TAG:-}"
-if [[ -n "$EXPERIMENT_TAG" ]]; then
-    OUTPUT_DIR="${OUTPUT_DIR}/${EXPERIMENT_TAG}"
-    if [[ "$BUILD_DIR_DEFAULT" -eq 1 ]]; then
-        BUILD_DIR="${BUILD_DIR}/${EXPERIMENT_TAG}"
-    fi
-fi
+# 快取控制
+CACHE_CLEAR_ENABLED="${CACHE_CLEAR_ENABLED:-1}"
 
-if [[ ! -f "$SEARCH_CSV" ]]; then
-    echo "ERROR: 找不到 SEARCH_CSV: $SEARCH_CSV" >&2
-    exit 1
-fi
-if [[ ! "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [[ "$MAX_PARALLEL" -lt 1 ]]; then
-    echo "ERROR: MAX_PARALLEL 需為正整數" >&2
-    exit 1
-fi
+# 診斷模式
+DRY_RUN="${DRY_RUN:-0}"
 
-# ==================== 函數定義 ====================
+# ==================== 命令行參數解析 ====================
 
-strip_ws() { echo "$1" | tr -d '[:space:]'; }
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --search-csv) SEARCH_CSV="$2"; shift 2 ;;
+        --dataset) DATASET="$2"; shift 2 ;;
+        --max-parallel) MAX_PARALLEL="$2"; shift 2 ;;
+        --repeat-count) REPEAT_COUNT="$2"; shift 2 ;;
+        --clean) CLEAN="1"; shift ;;
+        --) shift; break ;;
+        -*) echo "ERROR: 未知參數 $1" >&2; exit 1 ;;
+        *) echo "ERROR: 不支援位置參數，請使用命名參數" >&2; exit 1 ;;
+    esac
+done
 
-resolve_temp_device() {
-    # 優先順序：環境變數 TEMP_DEVICE（非預設值）> 當前目錄的設備 > 預設 /dev/nvme0
-    local default_temp_device="/dev/nvme0"
-    if [[ -n "$TEMP_DEVICE" && "$TEMP_DEVICE" != "$default_temp_device" ]]; then
-        echo "$TEMP_DEVICE"
-        return 0
-    fi
-    # 嘗試從 OUTPUT_DIR 推斷設備
-    local output_dir="${OUTPUT_DIR:-${SCRIPT_DIR}/outputFiles/search}"
-    if [[ -e "$output_dir" ]]; then
-        local detected_device=$(df -P "$output_dir" 2>/dev/null | awk 'NR==2 {print $1}')
-        if [[ -n "$detected_device" && "$detected_device" =~ nvme ]]; then
-            echo "$detected_device"
-            return 0
-        fi
-    fi
-    echo "$default_temp_device"
+# ==================== 參數驗證 ====================
+
+[[ ! -f "$SEARCH_CSV" ]] && { echo "ERROR: 找不到 SEARCH_CSV: $SEARCH_CSV" >&2; exit 1; }
+[[ ! "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [[ "$MAX_PARALLEL" -lt 1 ]] && { echo "ERROR: MAX_PARALLEL 需為正整數" >&2; exit 1; }
+[[ ! "$REPEAT_COUNT" =~ ^[0-9]+$ ]] || [[ "$REPEAT_COUNT" -lt 1 ]] && { echo "ERROR: REPEAT_COUNT 需為正整數" >&2; exit 1; }
+[[ ! -d "$BUILD_DIR" ]] && { echo "ERROR: 找不到 BUILD_DIR 目錄: $BUILD_DIR" >&2; exit 1; }
+
+# ==================== 工具函數 ====================
+
+strip_ws() {
+    echo "$1" | tr -d '[:space:]'
 }
 
-# ==================== 主程序邏輯 ====================
-
-if [[ -n "$COOLDOWN_TEMP_C" ]]; then
-    if [[ "$COOLDOWN_TEMP_C" =~ ^[0-9]+$ ]]; then
-        COOLDOWN_ENABLED=1
-        # 在啟用降溫控制時自動推斷 TEMP_DEVICE
-        TEMP_DEVICE=$(resolve_temp_device)
-    else
-        echo "WARN: COOLDOWN_TEMP_C=$COOLDOWN_TEMP_C 不是整數，忽略降溫控制" >&2
-        COOLDOWN_TEMP_C=""
+resolve_temp_device() {
+    # 優先順序：環境變數（非預設） → OUTPUT_DIR 所在設備 → /dev/nvme0
+    [[ -n "$TEMP_DEVICE" ]] && { echo "$TEMP_DEVICE"; return 0; }
+    
+    # 嘗試從 OUTPUT_DIR 推斷 NVMe 設備
+    local check_dir="${OUTPUT_DIR:-${SCRIPT_DIR}}"
+    if [[ -d "$check_dir" ]]; then
+        local detected=$(df -P "$check_dir" 2>/dev/null | awk 'NR==2 {print $1}')
+        [[ "$detected" =~ nvme ]] && { echo "$detected"; return 0; }
     fi
-fi
-if [[ "$ENABLE_IOSTAT" == "1" && "$MAX_PARALLEL" -ne 1 ]]; then
-    echo "WARN: ENABLE_IOSTAT=1 建議單一序列執行，已將 MAX_PARALLEL 強制為 1" >&2
-    MAX_PARALLEL=1
-fi
-if [[ "$ENABLE_WA_LOG" == "1" && "$MAX_PARALLEL" -ne 1 ]]; then
-    echo "WARN: ENABLE_WA_LOG=1 建議單一序列執行，已將 MAX_PARALLEL 強制為 1" >&2
-    MAX_PARALLEL=1
-fi
-if [[ "$COOLDOWN_ENABLED" == "1" && "$MAX_PARALLEL" -ne 1 ]]; then
-    echo "WARN: 啟用 COOLDOWN_TEMP_C 時改為單工，已將 MAX_PARALLEL 強制為 1" >&2
-    MAX_PARALLEL=1
-fi
-if [[ ! -d "$BUILD_DIR" ]]; then
-    echo "ERROR: 找不到 BUILD_DIR 目錄: $BUILD_DIR" >&2
-    exit 1
-fi
-
-# 清除舊數據（若 CLEAN=1）
-if [[ "$CLEAN" == "1" ]]; then
-    if [[ -d "$OUTPUT_DIR" ]]; then
-        echo "清除舊的搜尋結果: $OUTPUT_DIR"
-        rm -rf "$OUTPUT_DIR"
-    fi
-fi
-
-mkdir -p "$OUTPUT_DIR"
-
-if [[ "$DRY_RUN" != "1" ]]; then
-    if [[ ! -x "$SEARCH_BIN" ]]; then
-        echo "ERROR: search_disk_index 不存在或不可執行: $SEARCH_BIN" >&2
-        echo "請先編譯: cmake --build build --target all -- -j" >&2
-        exit 1
-    fi
-else
-    if [[ ! -x "$SEARCH_BIN" ]]; then
-        echo "WARN: DRY_RUN 模式忽略不存在的 search_disk_index: $SEARCH_BIN" >&2
-    fi
-fi
-
-strip_ws() { echo "$1" | tr -d '[:space:]'; }
-
-resolve_iostat_device() {
-    local path_hint="$1"
-    if [[ -n "$IOSTAT_DEVICE" ]]; then
-        echo "$IOSTAT_DEVICE"
-        return 0
-    fi
-    if [[ -n "$IOSTAT_DATA_PATH" && -e "$IOSTAT_DATA_PATH" ]]; then
-        df -P "$IOSTAT_DATA_PATH" | awk 'NR==2 {print $1}'
-        return 0
-    fi
-    if [[ -n "$path_hint" && -e "$path_hint" ]]; then
-        df -P "$path_hint" | awk 'NR==2 {print $1}'
-        return 0
-    fi
-    echo ""
+    
+    echo "/dev/nvme0"  # 預設回退
 }
 
 get_nvme_temperature_c() {
     local dev="$1"
-    if [[ -z "$dev" || ! -e "$dev" ]]; then
-        echo ""
-        return 0
-    fi
-
-    local nvme_cmd=(nvme)
-    if [[ "$NVME_USE_SUDO" == "1" ]]; then
-        nvme_cmd=(sudo -n nvme)
-    fi
-
-    if command -v "${nvme_cmd[-1]}" >/dev/null 2>&1; then
-        local temp
-        local output
-        if output=$("${nvme_cmd[@]}" smart-log "$dev" 2>/dev/null); then
+    [[ -z "$dev" ]] && return 1
+    
+    if command -v nvme >/dev/null 2>&1; then
+        local temp=""
+        
+        # 方法 1：嘗試不用 sudo
+        if output=$(nvme smart-log "$dev" 2>/dev/null); then
             temp=$(echo "$output" | awk '
-                /^temperature/ {comp=$3}
-                /^Temperature Sensor/ {
-                    if ($5 ~ /^[0-9]+$/) {
-                        if ($5 > max) max=$5
+                BEGIN {max_temp = 0}
+                /[Tt]emperature/ && /:/ {
+                    for (i = 1; i <= NF; i++) {
+                        if ($i == ":") {
+                            temp_val = $(i+1)
+                            if (temp_val ~ /^[0-9]+$/ && temp_val > max_temp) {
+                                max_temp = temp_val
+                            }
+                            break
+                        }
                     }
                 }
-                END {
-                    if (max == "" && comp != "") max=comp
-                    if (max != "") print max
-                }')
-            if [[ -n "$temp" ]]; then
-                echo "$temp"
-                return 0
-            else
-                echo "WARN: nvme smart-log 無法解析溫度（輸出為空），改用 hwmon 後備" >&2
-            fi
-        else
-            echo "WARN: nvme smart-log 執行失敗，狀態碼 $?，改用 hwmon 後備" >&2
+                END {if (max_temp > 0) print max_temp}
+            ')
+            [[ -n "$temp" ]] && echo "$temp" && return 0
+        fi
+        
+        # 方法 2：自動嘗試用 sudo -n（已配置 sudoers 免密碼）
+        if output=$(sudo -n nvme smart-log "$dev" 2>/dev/null); then
+            temp=$(echo "$output" | awk '
+                BEGIN {max_temp = 0}
+                /[Tt]emperature/ && /:/ {
+                    for (i = 1; i <= NF; i++) {
+                        if ($i == ":") {
+                            temp_val = $(i+1)
+                            if (temp_val ~ /^[0-9]+$/ && temp_val > max_temp) {
+                                max_temp = temp_val
+                            }
+                            break
+                        }
+                    }
+                }
+                END {if (max_temp > 0) print max_temp}
+            ')
+            [[ -n "$temp" ]] && echo "$temp" && return 0
         fi
     fi
-
-    # Fallback to sysfs hwmon (millidegree)
-    local block_name
-    block_name="$(basename "$dev")"
-    local hwmon_files=("/sys/block/${block_name}/device/hwmon/"*/temp*_input)
-    for f in "${hwmon_files[@]}"; do
-        if [[ -f "$f" ]]; then
-            local milli
-            milli=$(cat "$f" 2>/dev/null)
-            if [[ "$milli" =~ ^[0-9]+$ ]]; then
-                echo $((milli / 1000))
-                return 0
-            fi
-        fi
-    done
-
-    echo ""
+    
+    # 回退到 sysfs hwmon
+    local block_name="$(basename "$dev" 2>/dev/null)"
+    local hwmon_temp=""
+    if [[ -d "/sys/block/${block_name}/device/hwmon" ]]; then
+        for f in /sys/block/${block_name}/device/hwmon/*/temp*_input; do
+            [[ -f "$f" ]] && hwmon_temp=$(cat "$f" 2>/dev/null | awk '{print int($1/1000); exit}') && break
+        done
+    fi
+    [[ -n "$hwmon_temp" ]] && echo "$hwmon_temp" && return 0
+    
+    return 1
 }
 
-block_until_cool() {
+wait_for_temp_ok() {
     local threshold="$1"
     local interval="$2"
-    local dev="$3"
-
-    if [[ "$COOLDOWN_ENABLED" -ne 1 ]]; then
-        return 0
-    fi
-
+    local device="$3"
+    
+    # 若未設定溫度閾值或設備無效，直接通過
+    [[ -z "$threshold" ]] || [[ -z "$device" ]] && return 0
+    [[ ! "$threshold" =~ ^[0-9]+$ ]] && return 0
+    [[ "$threshold" -le 0 ]] && return 0  # 0 表示禁用
+    
     while true; do
-        local temp
-        temp="$(get_nvme_temperature_c "$dev")"
-
+        local temp=$(get_nvme_temperature_c "$device" 2>/dev/null || echo "")
+        
         if [[ -z "$temp" ]]; then
-            echo "WARN: 無法讀取 $dev 溫度，停止降溫等待" >&2
+            echo "WARN: 無法讀取 $device 溫度，跳過溫度檢測" >&2
             return 0
         fi
-        if ! [[ "$temp" =~ ^[0-9]+$ ]]; then
-            echo "WARN: 讀到的溫度值非數字（$temp），停止降溫等待" >&2
-            return 0
-        fi
-
+        
         if [[ "$temp" -lt "$threshold" ]]; then
-            echo "INFO: $dev 溫度 ${temp}°C < ${threshold}°C，可開始下一筆搜尋" >&2
+            echo "INFO: NVMe $device 溫度 ${temp}°C < ${threshold}°C，可開始搜尋" >&2
             return 0
         fi
-
-        echo "INFO: $dev 溫度 ${temp}°C >= ${threshold}°C，等待 ${interval}s 後重試" >&2
+        
+        echo "INFO: NVMe $device 溫度 ${temp}°C >= ${threshold}°C，等待 ${interval}s..." >&2
         sleep "$interval"
     done
 }
 
-search_ids=()
-search_ws=()
-search_ls=()
-search_ks=()
-search_caches=()
-search_threads=()
+clear_cache() {
+    echo "INFO: 清除系統快取" >&2
+    sync 2>/dev/null || true
+    
+    # 嘗試使用 tee（需配置 sudoers）
+    if echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    # 回退到 sh -c（舊方法）
+    if sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
+        return 0
+    fi
+    
+    # 檢測是否在 Docker 容器內
+    if [[ -f "/.dockerenv" ]]; then
+        echo "WARN: 在 Docker 容器內無法清除快取（需要在主機上執行）" >&2
+        echo "      建議使用 docker_run_search.sh 腳本，會自動清除快取後再執行容器" >&2
+        return 0  # 不中止，允許繼續（warm cache 測試）
+    fi
+    
+    echo "WARN: 清除快取失敗（需要 sudo 權限）。請執行：" >&2
+    echo "  bash setup_sudoers.sh" >&2
+    return 0  # 不中止，允許繼續
+}
+
+resolve_iostat_device() {
+    [[ -n "$IOSTAT_DEVICE" ]] && { echo "$IOSTAT_DEVICE"; return 0; }
+    [[ -n "$IOSTAT_DATA_PATH" ]] && [[ -e "$IOSTAT_DATA_PATH" ]] && { df -P "$IOSTAT_DATA_PATH" 2>/dev/null | awk 'NR==2 {print $1}'; return 0; }
+    [[ -n "$1" ]] && [[ -e "$1" ]] && { df -P "$1" 2>/dev/null | awk 'NR==2 {print $1}'; return 0; }
+    echo ""
+}
+
+infer_dataset_name() {
+    local index_name="$1"
+    local inferred=""
+
+    if [[ "$index_name" =~ ^([^_]+)_R([0-9]+)_L([0-9]+)_B([0-9.]+)_M([0-9]+)_disk\.index$ ]]; then
+        inferred="${BASH_REMATCH[1]}"
+    elif [[ "$index_name" =~ ^([^_]+)_R([0-9]+)_L([0-9]+)_disk\.index$ ]]; then
+        inferred="${BASH_REMATCH[1]}"
+    elif [[ "$index_name" =~ ^([^_]+)_ ]]; then
+        inferred="${BASH_REMATCH[1]}"
+    fi
+
+    echo "$inferred"
+}
+
+# ==================== 主程序初始化 ====================
+
+echo "INFO: EXPERIMENT_TAG=$EXPERIMENT_TAG"
+echo "INFO: REPEAT_COUNT=$REPEAT_COUNT"
+echo "INFO: CACHE_CLEAR_ENABLED=$CACHE_CLEAR_ENABLED"
+echo "INFO: COOLDOWN_TEMP_C=$COOLDOWN_TEMP_C"
+
+# 監測衝突檢測與溫度控制初始化（集中強制單工邏輯）
+force_serial_reason=""
+if [[ "$COOLDOWN_TEMP_C" =~ ^[0-9]+$ ]] && [[ "$COOLDOWN_TEMP_C" -gt 0 ]]; then
+    TEMP_DEVICE=$(resolve_temp_device)
+    echo "INFO: 溫度控制啟用，設備：$TEMP_DEVICE，閾值：${COOLDOWN_TEMP_C}°C"
+    force_serial_reason="溫度控制"
+fi
+
+if [[ "$ENABLE_IOSTAT" == "1" ]] && [[ -z "$force_serial_reason" ]]; then
+    force_serial_reason="ENABLE_IOSTAT"
+elif [[ "$ENABLE_WA_LOG" == "1" ]] && [[ -z "$force_serial_reason" ]]; then
+    force_serial_reason="ENABLE_WA_LOG"
+elif [[ "$REPEAT_COUNT" -gt 1 ]] && [[ -z "$force_serial_reason" ]]; then
+    force_serial_reason="多次重複搜尋"
+elif [[ "$CACHE_CLEAR_ENABLED" == "1" ]] && [[ -z "$force_serial_reason" ]]; then
+    force_serial_reason="快取清除"
+fi
+
+if [[ -n "$force_serial_reason" && "$MAX_PARALLEL" -ne 1 ]]; then
+    echo "WARN: $force_serial_reason 強制單工模式（MAX_PARALLEL=$MAX_PARALLEL → 1）"
+    MAX_PARALLEL=1
+fi
+
+# 清除舊數據
+[[ "$CLEAN" == "1" && -d "$OUTPUT_DIR" ]] && { echo "清除舊的搜尋結果: $OUTPUT_DIR"; rm -rf "$OUTPUT_DIR"; }
+mkdir -p "$OUTPUT_DIR"
+
+# 檢查可執行文件
+[[ "$DRY_RUN" != "1" && ! -x "$SEARCH_BIN" ]] && { echo "ERROR: search_disk_index 不存在或不可執行: $SEARCH_BIN" >&2; exit 1; }
+
+# ==================== 讀取搜尋配置 ====================
+
+search_ids=() search_ws=() search_ls=() search_ks=() search_caches=() search_threads=()
 
 exec 3< "$SEARCH_CSV"
-read -r _header <&3
+read -r _header <&3 || true
 while IFS=',' read -r search_id search_W search_L search_K search_cache search_thread _rest <&3 || [[ -n "${search_id:-}" ]]; do
     search_id=$(strip_ws "${search_id:-}")
     [[ -z "$search_id" ]] && continue
@@ -353,77 +381,44 @@ while IFS=',' read -r search_id search_W search_L search_K search_cache search_t
 done
 exec 3<&-
 
-if [[ "${#search_ids[@]}" -eq 0 ]]; then
-    echo "ERROR: search_configs.csv 沒有任何可用的設定" >&2
-    exit 1
-fi
+[[ "${#search_ids[@]}" -eq 0 ]] && { echo "ERROR: search_configs.csv 無有效行" >&2; exit 1; }
 
-# 驗證數組長度一致
-if [[ "${#search_ws[@]}" -ne "${#search_ids[@]}" || "${#search_ls[@]}" -ne "${#search_ids[@]}" || "${#search_ks[@]}" -ne "${#search_ids[@]}" || "${#search_caches[@]}" -ne "${#search_ids[@]}" || "${#search_threads[@]}" -ne "${#search_ids[@]}" ]]; then
-    echo "ERROR: CSV 列數解析不匹配" >&2
-    echo "  search_ids: ${#search_ids[@]}, search_ws: ${#search_ws[@]}, search_ls: ${#search_ls[@]}, search_ks: ${#search_ks[@]}, search_caches: ${#search_caches[@]}, search_threads: ${#search_threads[@]}" >&2
-    exit 1
-fi
+# ==================== 搜尋執行函數 ====================
 
-shopt -s nullglob
-index_files=("${BUILD_DIR}"/*_disk.index)
-shopt -u nullglob
-if [[ "${#index_files[@]}" -eq 0 ]]; then
-    echo "ERROR: 在 $BUILD_DIR 找不到任何 *_disk.index" >&2
-    exit 1
-fi
-
-run_one() {
+run_search() {
     local index_prefix="$1" index_tag="$2" dataset_name="$3"
-    local search_id="$4" W="$5" L="$6" K="$7" cache="$8" threads="$9"
-    local iostat_pid="" pidstat_pid="" wa_pid="" search_pid=""
+    local search_id="$4" W="$5" L="$6" K="$7" cache="$8" threads="$9" repeat_idx="${10:-1}"
+    
+    # 準備結果路徑
     local result_dir="${OUTPUT_DIR}/${index_tag}"
-    local search_tag="${search_id}"
-    if [[ "$search_tag" == S* ]]; then
-        search_tag="${search_tag#S}"
-    fi
-    local log_file=""
-    local query_file="${QUERY_FILE:-${DISKANN_ROOT}/data/${dataset_name}/${dataset_name}_query.bin}"
-    local gt_file="${GT_FILE:-${DISKANN_ROOT}/data/${dataset_name}/${dataset_name}_groundtruth.bin}"
-    local thread_value="${THREAD_OVERRIDE:-${threads}}"
-    local K_value="${K_OVERRIDE:-${K}}"
-    local result_prefix_basename="S${search_tag}_${index_tag}_W${W}_L${L}_K${K_value}_cache${cache}_T${threads}"
+    local search_tag="${search_id#S}"  # 移除前導 'S'
+    local K_value="${K_OVERRIDE:-$K}"
+    local thread_value="${THREAD_OVERRIDE:-$threads}"
+    local result_prefix_basename="S${search_tag}_${index_tag}_W${W}_L${L}_K${K_value}_cache${cache}_T${thread_value}_${repeat_idx}"
     local result_subdir="${result_dir}/${result_prefix_basename}"
     local result_prefix="${result_subdir}/${result_prefix_basename}"
-    local stats_csv="${result_prefix}_summary_stats.csv"
-    local per_query_csv="${result_prefix}_query_stats.csv"
-    local thread_timeline_csv="${result_prefix}_thread_timeline.csv"
-    local read_trace_csv="${result_prefix}_read_trace.csv"
-    local iostat_log="${stats_csv%_summary_stats.csv}_iostat.log"
-    local pidstat_log="${stats_csv%_summary_stats.csv}_pidstat.log"
-    local wa_log="${stats_csv%_summary_stats.csv}_wa.log"
-    local expanded_nodes_csv="${stats_csv%_summary_stats.csv}_expanded_nodes.csv"
-
+    
     mkdir -p "$result_subdir"
-    log_file="${result_subdir}/search_${search_id}.log"
+    local log_file="${result_subdir}/search.log"
+    
+    local qf="${QUERY_FILE:-${DISKANN_ROOT}/data/${dataset_name}/${dataset_name}_query.bin}"
+    local gf="${GT_FILE:-${DISKANN_ROOT}/data/${dataset_name}/${dataset_name}_groundtruth.bin}"
 
+    # ========== 驗證輸入文件 ==========
     if [[ "$DRY_RUN" != "1" ]]; then
-        if [[ ! -f "${index_prefix}_disk.index" ]]; then
-            echo "ERROR: 找不到 index 檔案: ${index_prefix}_disk.index" >&2
-            return 1
-        fi
-        if [[ -z "${QUERY_FILE:-}" && ! -f "$query_file" ]]; then
-            echo "ERROR: 找不到 query 檔案: $query_file" >&2
-            return 1
-        fi
-        if [[ -z "${GT_FILE:-}" && ! -f "$gt_file" ]]; then
-            echo "ERROR: 找不到 groundtruth 檔案: $gt_file" >&2
-            return 1
-        fi
+        [[ ! -f "${index_prefix}_disk.index" ]] && { echo "ERROR: 找不到 index 檔案: ${index_prefix}_disk.index" >&2; return 1; }
+        [[ ! -f "$qf" ]] && { echo "ERROR: 找不到 query 檔案: $qf" >&2; return 1; }
+        [[ ! -f "$gf" ]] && { echo "ERROR: 找不到 groundtruth 檔案: $gf" >&2; return 1; }
     fi
-
-    cmd=(
+    
+    # ========== 階段 3：構建搜尋命令 ==========
+    local cmd=(
         "${SEARCH_BIN}"
         --data_type "${DATA_TYPE}"
         --dist_fn "${DIST_FN}"
         --index_path_prefix "${index_prefix}"
-        --query_file "${query_file}"
-        --gt_file "${gt_file}"
+        --query_file "${qf}"
+        --gt_file "${gf}"
         --result_path "${result_prefix}"
         --num_nodes_to_cache "${cache}"
         --num_threads "${thread_value}"
@@ -431,168 +426,143 @@ run_one() {
         -L "${L}"
         -W "${W}"
     )
-    if [[ "${ENABLE_SUMMARY_STATS:-1}" != "0" ]]; then
-        cmd+=(--stats_csv_path "${stats_csv}")
-    fi
-    if [[ "${ENABLE_PER_QUERY_STATS:-0}" == "1" ]]; then
-        cmd+=(--per_query_stats_path "${per_query_csv}")
-    fi
-    if [[ "${ENABLE_THREAD_TIMELINE}" == "1" ]]; then
-        cmd+=(--thread_timeline_path "${thread_timeline_csv}")
-    fi
-    if [[ "${ENABLE_READ_TRACE}" == "1" ]]; then
-        cmd+=(--read_trace_path "${read_trace_csv}")
-    fi
-    if [[ "$ENABLE_EXPANDED_NODES" == "1" ]]; then
-        cmd+=(--record_expanded_nodes --expanded_nodes_path "${expanded_nodes_csv}" --expanded_nodes_limit "${EXPANDED_NODES_LIMIT}")
-    fi
-    if [[ -n "$SEARCH_IO_LIMIT" ]]; then
-        cmd+=(--search_io_limit "${SEARCH_IO_LIMIT}")
-    fi
-    if [[ -n "$EXTRA_ARGS" ]]; then
-        # shellcheck disable=SC2206
-        cmd+=($EXTRA_ARGS)
-    fi
-
-    echo "▶ ${index_tag} / ${search_id}: L=${L} W=${W} cache=${cache} T=${thread_value} K=${K_value}"
-
+    
+    [[ "$ENABLE_SUMMARY_STATS" == "1" ]] && cmd+=(--stats_csv_path "${result_prefix}_summary_stats.csv")
+    [[ "$ENABLE_PER_QUERY_STATS" == "1" ]] && cmd+=(--per_query_stats_path "${result_prefix}_query_stats.csv")
+    [[ "$ENABLE_THREAD_TIMELINE" == "1" ]] && cmd+=(--thread_timeline_path "${result_prefix}_thread_timeline.csv")
+    [[ "$ENABLE_READ_TRACE" == "1" ]] && cmd+=(--read_trace_path "${result_prefix}_read_trace.csv")
+    [[ "$ENABLE_EXPANDED_NODES" == "1" ]] && cmd+=(--record_expanded_nodes --expanded_nodes_path "${result_prefix}_expanded_nodes.csv" --expanded_nodes_limit "${EXPANDED_NODES_LIMIT}")
+    [[ -n "$SEARCH_IO_LIMIT" ]] && cmd+=(--search_io_limit "${SEARCH_IO_LIMIT}")
+    [[ -n "$EXTRA_ARGS" ]] && cmd+=($EXTRA_ARGS)
+    
+    echo "▶ ${index_tag} / ${search_id}: W=${W} L=${L} K=${K_value} cache=${cache} T=${thread_value} [${repeat_idx}/${REPEAT_COUNT}]"
+    
+    # DRY RUN 模式
     if [[ "$DRY_RUN" == "1" ]]; then
-        printf 'DRY-RUN: %q ' "${cmd[@]}" > "$log_file"
+        printf 'DRY: %q ' "${cmd[@]}" > "$log_file"
         printf '\n' >> "$log_file"
-        echo "✓ ${index_tag} / ${search_id} 完成 (dry-run)"
+        echo "✓ 完成 (dry-run)"
         return 0
     fi
 
-    block_until_cool "$COOLDOWN_TEMP_C" "$COOLDOWN_CHECK_INTERVAL" "$TEMP_DEVICE"
-
+    # ========== 階段 1：清除快取 ==========
+    [[ "$CACHE_CLEAR_ENABLED" == "1" ]] && clear_cache
+    
+    # ========== 階段 2：溫度檢測 ==========
+    wait_for_temp_ok "$COOLDOWN_TEMP_C" "$COOLDOWN_CHECK_INTERVAL" "$TEMP_DEVICE"
+    
+    # ========== 階段 4：執行搜尋 ==========
+    local iostat_pid="" pidstat_pid="" wa_pid="" search_pid=""
+    
+    # 啟動 iostat（若啟用）
     if [[ "$ENABLE_IOSTAT" == "1" ]]; then
-        if ! command -v iostat >/dev/null 2>&1; then
-            echo "WARN: ENABLE_IOSTAT=1 但找不到 iostat，略過記錄" >&2
-        else
-            local device
-            device="$(resolve_iostat_device "${index_prefix}_disk.index")"
+        local device
+        device=$(resolve_iostat_device "${index_prefix}_disk.index")
+        if command -v iostat >/dev/null 2>&1; then
             if [[ -n "$device" ]]; then
-                iostat -x "$IOSTAT_INTERVAL" "$device" > "$iostat_log" &
+                iostat -x "$IOSTAT_INTERVAL" "$device" > "${result_prefix}_iostat.log" 2>&1 &
             else
-                iostat -x "$IOSTAT_INTERVAL" > "$iostat_log" &
+                iostat -x "$IOSTAT_INTERVAL" > "${result_prefix}_iostat.log" 2>&1 &
             fi
             iostat_pid=$!
         fi
     fi
-
+    
+    # 執行搜尋與監測
     if [[ "$ENABLE_PIDSTAT" == "1" || "$ENABLE_WA_LOG" == "1" ]]; then
-        "${cmd[@]}" > "${log_file}" 2>&1 < /dev/null &
+        # 背景執行搜尋並監測
+        "${cmd[@]}" > "$log_file" 2>&1 &
         search_pid=$!
-        if [[ "$ENABLE_PIDSTAT" == "1" ]]; then
-            if ! command -v pidstat >/dev/null 2>&1; then
-                echo "WARN: ENABLE_PIDSTAT=1 但找不到 pidstat，略過記錄" >&2
-            else
-                pidstat -t -u -d -r -w -p "$search_pid" "$PIDSTAT_INTERVAL" > "$pidstat_log" &
-                pidstat_pid=$!
-            fi
-        fi
-        if [[ "$ENABLE_WA_LOG" == "1" ]]; then
-            if ! command -v mpstat >/dev/null 2>&1; then
-                echo "WARN: ENABLE_WA_LOG=1 但找不到 mpstat，略過記錄" >&2
-            else
-                mpstat -P ALL "$WA_INTERVAL" > "$wa_log" &
-                wa_pid=$!
-            fi
-        fi
-        if ! wait "$search_pid"; then
-            if [[ -n "${iostat_pid:-}" ]]; then
-                kill "$iostat_pid" >/dev/null 2>&1 || true
-            fi
-            if [[ -n "${pidstat_pid:-}" ]]; then
-                kill "$pidstat_pid" >/dev/null 2>&1 || true
-            fi
-            if [[ -n "${wa_pid:-}" ]]; then
-                kill "$wa_pid" >/dev/null 2>&1 || true
-            fi
-            echo "✗ ${index_tag} / ${search_id} 失敗，請檢查 ${log_file}"
-            return 1
-        fi
-        if [[ -n "${pidstat_pid:-}" ]]; then
-            kill "$pidstat_pid" >/dev/null 2>&1 || true
-        fi
-        if [[ -n "${wa_pid:-}" ]]; then
-            kill "$wa_pid" >/dev/null 2>&1 || true
-        fi
+        
+        [[ "$ENABLE_PIDSTAT" == "1" ]] && command -v pidstat >/dev/null 2>&1 && { 
+            pidstat -t -u -d -r -w -p "$search_pid" "$PIDSTAT_INTERVAL" > "${result_prefix}_pidstat.log" 2>&1 &
+            pidstat_pid=$!
+        }
+        
+        [[ "$ENABLE_WA_LOG" == "1" ]] && command -v mpstat >/dev/null 2>&1 && { 
+            mpstat -P ALL "$WA_INTERVAL" > "${result_prefix}_wa.log" 2>&1 &
+            wa_pid=$!
+        }
+        
+        # 等待搜尋完成
+        wait "$search_pid"
+        local ret=$?
+        
+        # 終止監測程序
+        [[ -n "$pidstat_pid" ]] && kill "$pidstat_pid" 2>/dev/null || true
+        [[ -n "$wa_pid" ]] && kill "$wa_pid" 2>/dev/null || true
+        [[ -n "$iostat_pid" ]] && kill "$iostat_pid" 2>/dev/null || true
+        
+        [[ $ret -ne 0 ]] && { echo "✗ 失敗，見 $log_file"; return 1; }
     else
-        if ! "${cmd[@]}" > "${log_file}" 2>&1 < /dev/null; then
-            if [[ -n "${iostat_pid:-}" ]]; then
-                kill "$iostat_pid" >/dev/null 2>&1 || true
-            fi
-            echo "✗ ${index_tag} / ${search_id} 失敗，請檢查 ${log_file}"
+        # 直接執行搜尋（前台）
+        if ! "${cmd[@]}" > "$log_file" 2>&1; then
+            [[ -n "$iostat_pid" ]] && kill "$iostat_pid" 2>/dev/null || true
+            echo "✗ 失敗，見 $log_file"
             return 1
         fi
+        [[ -n "$iostat_pid" ]] && kill "$iostat_pid" 2>/dev/null || true
     fi
-    if [[ -n "${iostat_pid:-}" ]]; then
-        kill "$iostat_pid" >/dev/null 2>&1 || true
-    fi
-    echo "✓ ${index_tag} / ${search_id} 完成"
-    if [[ "$SLEEP_SECONDS" =~ ^[0-9]+$ ]] && [[ "$SLEEP_SECONDS" -gt 0 ]]; then
-        sleep "$SLEEP_SECONDS"
-    fi
+    
+    echo "✓ 完成"
+    [[ "$SLEEP_SECONDS" =~ ^[0-9]+$ ]] && [[ "$SLEEP_SECONDS" -gt 0 ]] && sleep "$SLEEP_SECONDS"
 }
+
+# ==================== 主循環 ====================
+
+shopt -s nullglob
+index_files=("${BUILD_DIR}"/*_disk.index)
+shopt -u nullglob
+
+[[ "${#index_files[@]}" -eq 0 ]] && { echo "ERROR: 找不到 *_disk.index 在 $BUILD_DIR" >&2; exit 1; }
 
 fail=0
 declare -A pid_to_job
 pids=()
 
 for index_file in "${index_files[@]}"; do
-    index_name="$(basename "$index_file")"
     index_prefix="${index_file%_disk.index}"
     index_tag="$(basename "$index_prefix")"
-
-    dataset_name=""
-
-    if [[ "$index_name" =~ ^([^_]+)_R([0-9]+)_L([0-9]+)_B([0-9.]+)_M([0-9]+)_disk\.index$ ]]; then
-        dataset_name="${BASH_REMATCH[1]}"
-    elif [[ "$index_name" =~ ^([^_]+)_R([0-9]+)_L([0-9]+)_disk\.index$ ]]; then
-        dataset_name="${BASH_REMATCH[1]}"
-    fi
-
-    # 只有當無法從索引文件名提取 dataset_name 時，才使用 DATASET 環境變數
-    if [[ -z "$dataset_name" && -n "$DATASET" ]]; then
-        dataset_name="$DATASET"
-    fi
+    
+    # 推斷 dataset_name
+    index_name="$(basename "$index_file")"
+    dataset_name="$(infer_dataset_name "$index_name")"
+    [[ -z "$dataset_name" && -n "$DATASET" ]] && dataset_name="$DATASET"
     if [[ -z "$dataset_name" ]]; then
-        echo "WARN: 無法從檔名解析 dataset，略過: $index_name" >&2
+        echo "WARN: 無法推斷 dataset，略過 $index_name" >&2
         continue
     fi
-
+    
+    # 遍歷所有搜尋配置和重複次數
     for i in "${!search_ids[@]}"; do
-        search_id="${search_ids[$i]}"
-        W="${search_ws[$i]}"
-        L="${search_ls[$i]}"
-        K="${search_ks[$i]}"
-        cache="${search_caches[$i]}"
-        threads="${search_threads[$i]}"
-
-        if (( MAX_PARALLEL == 1 )); then
-            if ! run_one "$index_prefix" "$index_tag" "$dataset_name" "$search_id" "$W" "$L" "$K" "$cache" "$threads"; then
-                fail=1
-            fi
-        else
-            run_one "$index_prefix" "$index_tag" "$dataset_name" "$search_id" "$W" "$L" "$K" "$cache" "$threads" </dev/null &
-            pid=$!
-            pid_to_job[$pid]="${index_tag}_${search_id}"
-            pids+=("$pid")
-
-            if (( ${#pids[@]} >= MAX_PARALLEL )); then
-                oldest_pid="${pids[0]}"
-                pids=("${pids[@]:1}")
-                if ! wait "$oldest_pid"; then
-                    echo "WARN: ${pid_to_job[$oldest_pid]:-unknown} 失敗，持續處理其餘樣本" >&2
+        for repeat_idx in $(seq 1 $REPEAT_COUNT); do
+            if (( MAX_PARALLEL == 1 )); then
+                # 單工模式：直接執行
+                if ! run_search "$index_prefix" "$index_tag" "$dataset_name" "${search_ids[$i]}" "${search_ws[$i]}" "${search_ls[$i]}" "${search_ks[$i]}" "${search_caches[$i]}" "${search_threads[$i]}" "$repeat_idx"; then
                     fail=1
                 fi
-                unset "pid_to_job[$oldest_pid]"
+            else
+                # 並行模式
+                run_search "$index_prefix" "$index_tag" "$dataset_name" "${search_ids[$i]}" "${search_ws[$i]}" "${search_ls[$i]}" "${search_ks[$i]}" "${search_caches[$i]}" "${search_threads[$i]}" "$repeat_idx" </dev/null &
+                pid=$!
+                pid_to_job[$pid]="${index_tag}_${search_ids[$i]}_r${repeat_idx}"
+                pids+=("$pid")
+                
+                if (( ${#pids[@]} >= MAX_PARALLEL )); then
+                    oldest_pid="${pids[0]}"
+                    pids=("${pids[@]:1}")
+                    if ! wait "$oldest_pid"; then
+                        echo "WARN: ${pid_to_job[$oldest_pid]:-unknown} 失敗，持續處理其餘樣本" >&2
+                        fail=1
+                    fi
+                    unset "pid_to_job[$oldest_pid]"
+                fi
             fi
-        fi
+        done
     done
 done
 
+# 等待所有剩餘的背景搜尋完成
 for pid in "${pids[@]}"; do
     if ! wait "$pid"; then
         echo "ERROR: ${pid_to_job[$pid]:-unknown} 失敗，請檢查對應 log" >&2
@@ -601,6 +571,7 @@ for pid in "${pids[@]}"; do
     unset "pid_to_job[$pid]"
 done
 
+# 最終輸出
 echo ""
 echo "=========================================="
 echo "批次搜尋完成，結果位於: $OUTPUT_DIR"
