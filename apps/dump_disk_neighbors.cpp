@@ -7,11 +7,13 @@
  * 功能：
  *   1. 讀取 expanded_nodes.csv 或純文字節點 ID 列表
  *   2. 從磁盤索引中讀取每個節點的鄰居信息
- *   3. 輸出 CSV 格式：node_id, degree, neighbor_pos, neighbor_id
+ *   3. 輸出 CSV 格式：node_id, neighbor_id
  * 
  * 用途：
  *   - 分析最常被展開的節點（熱點節點）的鄰居分佈
  *   - 用於離線分析圖結構與搜索模式
+ * 
+ * 注意：degree 可透過計算相同 node_id 的出現次數得到，故不額外記錄
  */
 
 #include <boost/program_options.hpp>
@@ -143,7 +145,7 @@ int dump_neighbors(const std::string &index_path_prefix, diskann::Metric metric,
     }
 
     // 寫入 CSV header
-    out << "node_id,degree,neighbor_pos,neighbor_id\n";
+    out << "node_id,neighbor_id\n";
     // 遍歷所有節點，輸出其鄰居信息
     for (size_t i = 0; i < node_ids.size(); i++)
     {
@@ -162,10 +164,10 @@ int dump_neighbors(const std::string &index_path_prefix, diskann::Metric metric,
                           << "), truncating" << std::endl;
             degree = static_cast<uint32_t>(stride);
         }
-        // 輸出每個鄰居：node_id, degree, neighbor_pos, neighbor_id
+        // 輸出每個鄰居：node_id, neighbor_id
         for (uint32_t j = 0; j < degree; j++)
         {
-            out << node_ids[i] << "," << degree << "," << j << "," << nbr_buffers[i].second[j] << "\n";
+            out << node_ids[i] << "," << nbr_buffers[i].second[j] << "\n";
         }
     }
 

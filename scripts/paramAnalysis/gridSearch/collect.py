@@ -837,7 +837,8 @@ def parse_topk_files(base_prefix, node_counts_csv):
             topk_rows.append(row)
             return topk_rows, {}
 
-        required_cols = {"node_id", "neighbor_id", "degree"}
+        # degree 欄位現已可選（新格式不包含）
+        required_cols = {"node_id", "neighbor_id"}
         if not required_cols.issubset(df.columns):
             topk_rows.append(row)
             return topk_rows, {}
@@ -847,8 +848,14 @@ def parse_topk_files(base_prefix, node_counts_csv):
         row["topk_expanded_unique_count"] = int(df["node_id"].nunique())
         row["topk_expanded_unique_neighbors_count"] = int(df["neighbor_id"].nunique())
 
-        # 度數統計
-        degree_per_node = df.groupby("node_id")["degree"].first()
+        # 度數統計：計算每個節點出現的次數（即其度數）
+        # 支援兩種格式：
+        # 1. 新格式：無 degree 欄位，透過 groupby().size() 計算
+        # 2. 舊格式：有 degree 欄位，透過 groupby().first() 讀取（結果相同）
+        if "degree" in df.columns:
+            degree_per_node = df.groupby("node_id")["degree"].first()
+        else:
+            degree_per_node = df.groupby("node_id").size()
         row["topk_expanded_degree_mean"] = float(degree_per_node.mean())
 
         for p in (0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 100):
