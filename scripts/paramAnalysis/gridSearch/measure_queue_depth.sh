@@ -7,6 +7,7 @@ usage() {
     cat <<'USAGE'
 用法:
   bash measure_queue_depth.sh "<command>"
+  bash measure_queue_depth.sh --clean
 
 範例:
   bash measure_queue_depth.sh "bash search_batch.sh ./inputFiles/search_configs.csv"
@@ -16,17 +17,44 @@ usage() {
   OUTPUT_DIR=./outputFiles/analyze
   DEVICE=/dev/nvme0n1    指定欲監控的 block device（選填）
   DATA_PATH=...          若未指定 DEVICE，會用 data file 所在磁碟推估
+  --clean                只刪除本腳本輸出的 iostat_*.log
 USAGE
 }
 
 [[ ${1:-} == "-h" || ${1:-} == "--help" ]] && { usage; exit 0; }
-[[ $# -lt 1 ]] && { usage; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/outputFiles/analyze}"
 IO_INTERVAL="${IO_INTERVAL:-1}"
 DEVICE="${DEVICE:-}"
 DATA_PATH="${DATA_PATH:-}"
+
+CLEAN=0
+args=()
+for a in "$@"; do
+    if [[ "$a" == "--clean" ]]; then
+        CLEAN=1
+    else
+        args+=("$a")
+    fi
+done
+set -- "${args[@]}"
+
+if [[ "$CLEAN" == "1" ]]; then
+    shopt -s nullglob
+    logs=("${OUTPUT_DIR}"/iostat_*.log)
+    shopt -u nullglob
+    removed=0
+    for f in "${logs[@]}"; do
+        rm -f "$f"
+        removed=$((removed + 1))
+        echo "刪除: ${f}"
+    done
+    echo "完成：已刪除 ${removed} 個 iostat log"
+    exit 0
+fi
+
+[[ $# -lt 1 ]] && { usage; exit 1; }
 
 if ! command -v iostat >/dev/null 2>&1; then
     echo "ERROR: 找不到 iostat，請先安裝 sysstat" >&2

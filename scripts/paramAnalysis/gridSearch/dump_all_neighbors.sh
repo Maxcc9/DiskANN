@@ -7,6 +7,7 @@ usage() {
     cat <<'USAGE'
 用法:
   bash dump_all_neighbors.sh [search_dir]
+  bash dump_all_neighbors.sh --clean [search_dir]
 
 參數:
   search_dir          預設 ./outputFiles/search
@@ -19,6 +20,7 @@ usage() {
   MAX_NODES           預設 0 (0 = all)
   KEEP_DUPLICATES     預設 0 (1 = keep duplicates)
   DRY_RUN=1           僅列印命令不執行
+  --clean             僅刪除本腳本輸出的 *_neighbors.csv
 USAGE
 }
 
@@ -28,6 +30,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISKANN_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 APPS_DIR="${DISKANN_ROOT}/build/apps"
 DUMP_BIN="${APPS_DIR}/dump_disk_neighbors"
+
+CLEAN=0
+args=()
+for a in "$@"; do
+    if [[ "$a" == "--clean" ]]; then
+        CLEAN=1
+    else
+        args+=("$a")
+    fi
+done
+set -- "${args[@]}"
 
 SEARCH_DIR="${1:-${SCRIPT_DIR}/outputFiles/search}"
 if [[ -z "${BUILD_DIR+x}" ]]; then
@@ -54,6 +67,31 @@ if [[ ! -d "$SEARCH_DIR" ]]; then
     echo "ERROR: 找不到 search_dir: $SEARCH_DIR" >&2
     exit 1
 fi
+
+expanded_files=()
+while IFS= read -r -d '' f; do
+    expanded_files+=("$f")
+done < <(find "$SEARCH_DIR" -type f -name "*_expanded_nodes.csv" -print0)
+
+if [[ "${#expanded_files[@]}" -eq 0 ]]; then
+    echo "ERROR: 找不到 *_expanded_nodes.csv 於 $SEARCH_DIR" >&2
+    exit 1
+fi
+
+if [[ "$CLEAN" == "1" ]]; then
+    removed=0
+    for expanded_csv in "${expanded_files[@]}"; do
+        output_csv="${expanded_csv%_expanded_nodes.csv}_neighbors.csv"
+        if [[ -f "$output_csv" ]]; then
+            rm -f "$output_csv"
+            removed=$((removed + 1))
+            echo "刪除: ${output_csv}"
+        fi
+    done
+    echo "完成：已刪除 ${removed} 個 neighbors CSV"
+    exit 0
+fi
+
 if [[ ! -d "$BUILD_DIR" ]]; then
     echo "ERROR: 找不到 build_dir: $BUILD_DIR" >&2
     exit 1
@@ -68,16 +106,6 @@ else
     if [[ ! -x "$DUMP_BIN" ]]; then
         echo "WARN: DRY_RUN 模式忽略不存在的 dump_disk_neighbors: $DUMP_BIN" >&2
     fi
-fi
-
-expanded_files=()
-while IFS= read -r -d '' f; do
-    expanded_files+=("$f")
-done < <(find "$SEARCH_DIR" -type f -name "*_expanded_nodes.csv" -print0)
-
-if [[ "${#expanded_files[@]}" -eq 0 ]]; then
-    echo "ERROR: 找不到 *_expanded_nodes.csv 於 $SEARCH_DIR" >&2
-    exit 1
 fi
 
 for expanded_csv in "${expanded_files[@]}"; do
