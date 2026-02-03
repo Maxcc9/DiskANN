@@ -57,6 +57,11 @@ def main():
     parser.add_argument("-i", "--input", required=True, help="Input collected_all_*.csv")
     parser.add_argument("-o", "--output", default=None, help="Output CSV path")
     parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Remove the output file that this script would generate, then exit",
+    )
+    parser.add_argument(
         "--key-cols",
         default=",".join(DEFAULT_KEY_COLS),
         help="Comma-separated key columns used for grouping",
@@ -73,6 +78,14 @@ def main():
         output_path = Path(args.output)
     else:
         output_path = input_path.with_name(input_path.stem + "_median" + input_path.suffix)
+
+    if args.clean:
+        if output_path.exists():
+            output_path.unlink()
+            print(f"Removed {output_path}")
+        else:
+            print(f"Not found: {output_path}")
+        return
 
     key_cols = [c.strip() for c in args.key_cols.split(",") if c.strip()]
     if not key_cols:
