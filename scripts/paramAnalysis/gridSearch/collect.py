@@ -333,12 +333,14 @@ def parse_read_trace(read_trace_csv, window_ms_list):
                 return {}
             required = {"ts_ns", "node_id", "os_tid", "is_cache_hit"}
             if not required.issubset(set(reader.fieldnames)):
-                return {}
+                # 支援舊格式（包含 omp_tid, read_bytes）與新格式
+                if not {"ts_ns", "node_id", "is_cache_hit"}.issubset(set(reader.fieldnames)):
+                    return {}
             for row in reader:
                 try:
                     ts = int(row["ts_ns"])
                     node_id = int(row["node_id"])
-                    tid = int(row["os_tid"])
+                    tid = int(row["os_tid"]) if "os_tid" in row and row["os_tid"] else -1
                     is_cache_hit = int(row["is_cache_hit"]) == 1
                 except (KeyError, ValueError):
                     continue

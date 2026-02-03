@@ -129,7 +129,7 @@ void PQFlashIndex<T, LabelT>::enable_read_trace(const std::string &path)
     _read_trace_stream.reset(new std::ofstream(path, std::ios::out | std::ios::trunc));
     if (_read_trace_stream && _read_trace_stream->is_open())
     {
-        (*_read_trace_stream) << "ts_ns,node_id,os_tid,omp_tid,query_id,read_bytes,is_cache_hit\n";
+        (*_read_trace_stream) << "ts_ns,node_id,os_tid,query_id,is_cache_hit\n";
         _read_trace_enabled = true;
     }
     else
@@ -1543,8 +1543,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     std::lock_guard<std::mutex> lock(_read_trace_mutex);
                     if (_read_trace_stream && _read_trace_stream->is_open())
                     {
-                        (*_read_trace_stream) << ts << "," << id << "," << tid << "," << omp_tid << ","
-                                              << g_query_id << "," << bytes << ",0\n";
+                        (*_read_trace_stream) << ts << "," << id << "," << tid << ","
+                                              << g_query_id << ",0\n";
                     }
                 }
                 if (stats != nullptr)
@@ -1615,8 +1615,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                 std::lock_guard<std::mutex> lock(_read_trace_mutex);
                 if (_read_trace_stream && _read_trace_stream->is_open())
                 {
-                    (*_read_trace_stream) << ts << "," << cached_nhood.first << "," << tid << "," << omp_tid << ","
-                                          << g_query_id << ",0,1\n";
+                    (*_read_trace_stream) << ts << "," << cached_nhood.first << "," << tid << ","
+                                          << g_query_id << ",1\n";
                 }
             }
             // Record actual expanded node (cache hit case)
