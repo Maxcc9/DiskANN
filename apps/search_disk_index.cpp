@@ -453,7 +453,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         }
         else if (!expanded_nodes_file_exists)
         {
-            expanded_nodes_stream << "L,beamwidth,query_id,order,node_id\n";
+            expanded_nodes_stream << "query_id,order,node_id\n";
         }
     }
 
@@ -861,7 +861,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                 const auto &nodes = stats[qi].expanded_nodes;
                 for (size_t idx = 0; idx < nodes.size(); idx++)
                 {
-                    expanded_nodes_stream << L << "," << optimized_beamwidth << "," << qi << "," << idx << ","
+                    expanded_nodes_stream << qi << "," << idx << ","
                                           << nodes[idx] << "\n";
                 }
                 dropped_total += stats[qi].expanded_nodes_dropped;
@@ -1007,7 +1007,7 @@ int main(int argc, char **argv)
             "Path to write SSD node read trace (CSV). If empty, trace is not written.");
         optional_configs.add_options()(
             "expanded_nodes_path", po::value<std::string>(&expanded_nodes_path)->default_value(std::string("")),
-            "Path to write expanded node list CSV (L,beamwidth,query_id,order,node_id)");
+            "Path to write expanded node list CSV (query_id,order,node_id)");
         optional_configs.add_options()(
             "expanded_nodes_limit", po::value<uint32_t>(&expanded_nodes_limit)->default_value(0),
             "Max expanded nodes to record per query (0 = unlimited)");
