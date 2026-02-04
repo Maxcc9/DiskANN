@@ -352,10 +352,15 @@ def _window_label(window_ms):
     return label.replace(".", "p")
 
 
-def parse_read_trace(read_trace_csv, window_ms_list):
+def parse_read_trace(read_trace_csv, window_ms_list, emit_intermediate=True):
     """解析 read_trace.csv：統計時間窗內重複讀取"""
     if not os.path.isfile(read_trace_csv):
-        return {}, None, {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
+        return {}, None, {
+            "window_stats_paths": {},
+            "window_stats_frames": {},
+            "node_stats_paths": [],
+            "hot_nodes_path": "",
+        }
     events_by_node = {}
     total_reads = 0
     cache_hits = 0
@@ -364,12 +369,22 @@ def parse_read_trace(read_trace_csv, window_ms_list):
         with open(read_trace_csv, newline="") as f:
             reader = csv.DictReader(f)
             if reader.fieldnames is None:
-                return {}, None, {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
+                return {}, None, {
+                    "window_stats_paths": {},
+                    "window_stats_frames": {},
+                    "node_stats_paths": [],
+                    "hot_nodes_path": "",
+                }
             required = {"ts_ns", "node_id", "os_tid", "is_cache_hit"}
             if not required.issubset(set(reader.fieldnames)):
                 # 支援舊格式（包含 omp_tid, read_bytes）與新格式
                 if not {"ts_ns", "node_id", "is_cache_hit"}.issubset(set(reader.fieldnames)):
-                    return {}, None, {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
+                    return {}, None, {
+                        "window_stats_paths": {},
+                        "window_stats_frames": {},
+                        "node_stats_paths": [],
+                        "hot_nodes_path": "",
+                    }
             for row in reader:
                 try:
                     ts = int(row["ts_ns"])
@@ -385,10 +400,20 @@ def parse_read_trace(read_trace_csv, window_ms_list):
                 else:
                     disk_reads += 1
     except Exception:
-        return {}, None, {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
+        return {}, None, {
+            "window_stats_paths": {},
+            "window_stats_frames": {},
+            "node_stats_paths": [],
+            "hot_nodes_path": "",
+        }
 
     if not events_by_node:
-        return {}, None, {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
+        return {}, None, {
+            "window_stats_paths": {},
+            "window_stats_frames": {},
+            "node_stats_paths": [],
+            "hot_nodes_path": "",
+        }
 
     stats = {
         "read_trace_total_reads": int(total_reads),
@@ -401,9 +426,15 @@ def parse_read_trace(read_trace_csv, window_ms_list):
 
     window_ms_list = _parse_window_ms_list(window_ms_list)
     stats["read_trace_window_ms_list"] = ",".join(f"{v:g}" for v in window_ms_list)
-    write_node_stats = os.environ.get("READ_TRACE_NODE_STATS", "1") == "1"
-    write_window_stats = os.environ.get("READ_TRACE_WINDOW_STATS", "1") == "1"
-    artifacts = {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
+    write_node_stats = emit_intermediate and (os.environ.get("READ_TRACE_NODE_STATS", "1") == "1")
+    write_window_stats = emit_intermediate and (os.environ.get("READ_TRACE_WINDOW_STATS", "1") == "1")
+    write_hot_nodes = emit_intermediate
+    artifacts = {
+        "window_stats_paths": {},
+        "window_stats_frames": {},
+        "node_stats_paths": [],
+        "hot_nodes_path": "",
+    }
 
     topk = int(os.environ.get("READ_TRACE_TOPK", "100"))
     hot_window_ms = window_ms_list[0]
@@ -418,6 +449,7 @@ def parse_read_trace(read_trace_csv, window_ms_list):
     events.sort(key=lambda x: x[0])
     t0 = events[0][0]
 
+    # 低記憶體優先：每個 window 逐一處理，避免同時維護多個 window 的大型聚合結構
     for window_ms in window_ms_list:
         window_label = _window_label(window_ms)
         window_ns = int(window_ms * 1_000_000)
@@ -537,14 +569,14 @@ def parse_read_trace(read_trace_csv, window_ms_list):
                     }
                 )
 
-        if write_window_stats and window_stats_rows:
-            base_prefix = read_trace_csv[: -len("_read_trace.csv")]
-            window_stats_path = f"{base_prefix}_read_trace_window_{window_label}ms_stats.csv"
-            with open(window_stats_path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=list(window_stats_rows[0].keys()))
-                writer.writeheader()
-                writer.writerows(window_stats_rows)
-            artifacts["window_stats_paths"][window_label] = window_stats_path
+        if window_stats_rows:
+            window_df = pd.DataFrame(window_stats_rows).sort_values("window_id")
+            artifacts["window_stats_frames"][window_label] = window_df
+            if write_window_stats:
+                base_prefix = read_trace_csv[: -len("_read_trace.csv")]
+                window_stats_path = f"{base_prefix}_read_trace_window_{window_label}ms_stats.csv"
+                window_df.to_csv(window_stats_path, index=False)
+                artifacts["window_stats_paths"][window_label] = window_stats_path
 
         stats[f"read_trace_repeat_reads_ms{window_label}"] = int(sum(window_repeat_reads))
         stats[f"read_trace_repeat_ratio_ms{window_label}"] = (
@@ -671,7 +703,7 @@ def parse_read_trace(read_trace_csv, window_ms_list):
         hot_rows.sort(
             key=lambda r: (r["repeat_multi_thread_reads"], r["total_reads"], r["unique_threads"]), reverse=True
         )
-        if hot_rows:
+        if hot_rows and write_hot_nodes:
             hot_window_label = _window_label(hot_window_ms)
             hot_path = f"{base_prefix}_read_trace_hot_nodes_{hot_window_label}ms_top{topk}.csv"
             with open(hot_path, "w", newline="") as f:
@@ -690,7 +722,7 @@ def parse_read_trace(read_trace_csv, window_ms_list):
     return stats, t0, artifacts
 
 
-def parse_thread_timeline_windows(thread_timeline_csv, window_ms_list, window_start_ns=None):
+def parse_thread_timeline_windows(thread_timeline_csv, window_ms_list, window_start_ns=None, emit_intermediate=True):
     """解析 thread_timeline.csv：彙總每個時間窗的 latency 分佈"""
     if not os.path.isfile(thread_timeline_csv):
         return {}, {}
@@ -720,7 +752,7 @@ def parse_thread_timeline_windows(thread_timeline_csv, window_ms_list, window_st
 
     window_ms_list = _parse_window_ms_list(window_ms_list)
 
-    write_window_stats = os.environ.get("THREAD_TIMELINE_WINDOW_STATS", "1") == "1"
+    write_window_stats = emit_intermediate and (os.environ.get("THREAD_TIMELINE_WINDOW_STATS", "1") == "1")
     window_paths = {}
     window_frames = {}
 
@@ -763,16 +795,13 @@ def parse_thread_timeline_windows(thread_timeline_csv, window_ms_list, window_st
     return window_paths, window_frames
 
 
-def compute_window_correlations(read_trace_window_path, latency_window_df, window_label):
+def compute_window_correlations(read_trace_window_df, latency_window_df, window_label):
     """計算 read_trace window stats 與 latency window stats 的相關性"""
-    if not os.path.isfile(read_trace_window_path):
+    if read_trace_window_df is None or read_trace_window_df.empty:
         return {}
     if latency_window_df is None or latency_window_df.empty:
         return {}
-    try:
-        read_df = pd.read_csv(read_trace_window_path)
-    except Exception:
-        return {}
+    read_df = read_trace_window_df.copy()
     if read_df.empty or "window_id" not in read_df.columns:
         return {}
 
@@ -961,6 +990,7 @@ def _process_one_summary_file(summary_file, read_trace_window_ms_list, cleanup=F
         read_trace_stats, read_trace_t0_ns, read_trace_artifacts = parse_read_trace(
             read_trace_csv,
             window_ms_list=read_trace_window_ms_list,
+            emit_intermediate=(not cleanup),
         )
         # node/hot 統計檔在 collect 階段後續不再使用，可立即刪除
         if cleanup:
@@ -991,6 +1021,7 @@ def _process_one_summary_file(summary_file, read_trace_window_ms_list, cleanup=F
                 thread_timeline_csv,
                 window_ms_list=read_trace_window_ms_list,
                 window_start_ns=read_trace_t0_ns,
+                emit_intermediate=(not cleanup),
             )
             window_list_str = read_trace_stats.get(
                 "read_trace_window_ms_list",
@@ -998,14 +1029,11 @@ def _process_one_summary_file(summary_file, read_trace_window_ms_list, cleanup=F
             )
             extra_cols["thread_timeline_window_ms_list"] = window_list_str
             for window_label, latency_df in window_latency_frames.items():
-                read_trace_window_path = read_trace_artifacts.get("window_stats_paths", {}).get(
-                    window_label,
-                    f"{base_prefix}_read_trace_window_{window_label}ms_stats.csv",
-                )
-                corr_stats = compute_window_correlations(read_trace_window_path, latency_df, window_label)
+                read_trace_window_df = read_trace_artifacts.get("window_stats_frames", {}).get(window_label)
+                corr_stats = compute_window_correlations(read_trace_window_df, latency_df, window_label)
                 extra_cols.update(corr_stats)
                 if cleanup:
-                    _safe_remove_file(read_trace_window_path)
+                    _safe_remove_file(read_trace_artifacts.get("window_stats_paths", {}).get(window_label, ""))
                     _safe_remove_file(window_latency_paths.get(window_label, ""))
         elif cleanup:
             # 沒做 correlation 的情況下，window stats 與 latency window 檔也可立即刪除
@@ -1082,7 +1110,10 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False, workers=N
         if workers_env.strip().isdigit():
             workers = int(workers_env.strip())
         else:
-            workers = 1
+            # 自動模式：避免直接打滿核心造成磁碟 I/O 爭用
+            workers = min(os.cpu_count() or 1, 8)
+    workers = max(1, int(workers))
+    workers = min(workers, len(summary_files))
     
     if verbose:
         print(f"找到 {len(summary_files)} 個 summary_stats.csv 檔案")
@@ -1194,7 +1225,7 @@ def main():
         "--workers",
         type=int,
         default=None,
-        help="用於平行化的 worker 數量 (預設: 1，或由 COLLECT_WORKERS 環境變數決定)"
+        help="用於平行化的 worker 數量 (預設: auto=min(CPU,8)，或由 COLLECT_WORKERS 環境變數覆寫)"
     )
     parser.add_argument(
         "--cleanup",
