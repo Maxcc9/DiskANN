@@ -24,6 +24,22 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 
+_CURRENT_SUMMARY_FILE = ""
+_GMEAN_WARNED = set()
+
+
+def _safe_remove_file(path):
+    """Best-effort remove; ignore missing/permission/transient errors."""
+    if not path:
+        return False
+    try:
+        os.remove(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
 
 def find_summary_files(search_dir):
     """遞迴查找所有 *_summary_stats.csv 檔案"""
@@ -166,7 +182,21 @@ def _compute_numeric_stats(prefix, values):
     vals_arr = np.array(values, dtype=float)
     stats = {}
     stats[f"{prefix}_mean"] = float(np.mean(vals_arr))
-    stats[f"{prefix}_gmean"] = float(np.exp(np.mean(np.log(vals_arr + 1e-10))))
+    bad_mask = (~np.isfinite(vals_arr)) | (vals_arr <= -1e-10)
+    if np.any(bad_mask):
+        key = (_CURRENT_SUMMARY_FILE, prefix)
+        if key not in _GMEAN_WARNED:
+            _GMEAN_WARNED.add(key)
+            bad_count = int(np.sum(bad_mask))
+            sample = vals_arr[bad_mask][:5]
+            src = _CURRENT_SUMMARY_FILE if _CURRENT_SUMMARY_FILE else "<unknown summary>"
+            print(
+                f"[WARN] invalid gmean input: file={src}, prefix={prefix}, "
+                f"bad_count={bad_count}, sample={sample.tolist()}",
+                file=sys.stderr,
+            )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        stats[f"{prefix}_gmean"] = float(np.exp(np.mean(np.log(vals_arr + 1e-10))))
     stats[f"{prefix}_var"] = float(np.var(vals_arr))
     stats[f"{prefix}_std"] = float(np.std(vals_arr))
     stats[f"{prefix}_iqr"] = float(np.quantile(vals_arr, 0.75) - np.quantile(vals_arr, 0.25))
@@ -214,7 +244,11 @@ def parse_pidstat_log(pidstat_log):
                     if key in ("UID", "PID", "TGID", "TID", "tid", "Command", "CPU", "%guest"):
                         continue
                     try:
-                        columns.setdefault(key, []).append(float(val))
+                        fval = float(val)
+                        # pidstat 在程序結束尾端可能用 -1 表示無效 I/O 速率，避免污染統計
+                        if key in ("kB_rd/s", "kB_wr/s", "kB_ccwr/s") and fval < 0:
+                            continue
+                        columns.setdefault(key, []).append(fval)
                     except ValueError:
                         continue
     except Exception:
@@ -321,7 +355,7 @@ def _window_label(window_ms):
 def parse_read_trace(read_trace_csv, window_ms_list):
     """解析 read_trace.csv：統計時間窗內重複讀取"""
     if not os.path.isfile(read_trace_csv):
-        return {}, None
+        return {}, None, {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
     events_by_node = {}
     total_reads = 0
     cache_hits = 0
@@ -330,12 +364,12 @@ def parse_read_trace(read_trace_csv, window_ms_list):
         with open(read_trace_csv, newline="") as f:
             reader = csv.DictReader(f)
             if reader.fieldnames is None:
-                return {}
+                return {}, None, {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
             required = {"ts_ns", "node_id", "os_tid", "is_cache_hit"}
             if not required.issubset(set(reader.fieldnames)):
                 # 支援舊格式（包含 omp_tid, read_bytes）與新格式
                 if not {"ts_ns", "node_id", "is_cache_hit"}.issubset(set(reader.fieldnames)):
-                    return {}
+                    return {}, None, {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
             for row in reader:
                 try:
                     ts = int(row["ts_ns"])
@@ -351,10 +385,10 @@ def parse_read_trace(read_trace_csv, window_ms_list):
                 else:
                     disk_reads += 1
     except Exception:
-        return {}, None
+        return {}, None, {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
 
     if not events_by_node:
-        return {}, None
+        return {}, None, {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
 
     stats = {
         "read_trace_total_reads": int(total_reads),
@@ -369,6 +403,7 @@ def parse_read_trace(read_trace_csv, window_ms_list):
     stats["read_trace_window_ms_list"] = ",".join(f"{v:g}" for v in window_ms_list)
     write_node_stats = os.environ.get("READ_TRACE_NODE_STATS", "1") == "1"
     write_window_stats = os.environ.get("READ_TRACE_WINDOW_STATS", "1") == "1"
+    artifacts = {"window_stats_paths": {}, "node_stats_paths": [], "hot_nodes_path": ""}
 
     topk = int(os.environ.get("READ_TRACE_TOPK", "100"))
     hot_window_ms = window_ms_list[0]
@@ -379,7 +414,7 @@ def parse_read_trace(read_trace_csv, window_ms_list):
         for ts, tid, is_cache_hit in node_events:
             events.append((ts, node_id, tid, is_cache_hit))
     if not events:
-        return stats, None
+        return stats, None, artifacts
     events.sort(key=lambda x: x[0])
     t0 = events[0][0]
 
@@ -509,6 +544,7 @@ def parse_read_trace(read_trace_csv, window_ms_list):
                 writer = csv.DictWriter(f, fieldnames=list(window_stats_rows[0].keys()))
                 writer.writeheader()
                 writer.writerows(window_stats_rows)
+            artifacts["window_stats_paths"][window_label] = window_stats_path
 
         stats[f"read_trace_repeat_reads_ms{window_label}"] = int(sum(window_repeat_reads))
         stats[f"read_trace_repeat_ratio_ms{window_label}"] = (
@@ -613,6 +649,7 @@ def parse_read_trace(read_trace_csv, window_ms_list):
                     writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
                     writer.writeheader()
                     writer.writerows(rows)
+                artifacts["node_stats_paths"].append(node_stats_path)
 
     if hot_stats:
         base_prefix = read_trace_csv[: -len("_read_trace.csv")]
@@ -641,6 +678,7 @@ def parse_read_trace(read_trace_csv, window_ms_list):
                 writer = csv.DictWriter(f, fieldnames=list(hot_rows[0].keys()))
                 writer.writeheader()
                 writer.writerows(hot_rows[:topk])
+            artifacts["hot_nodes_path"] = hot_path
             topk_total_reads = sum(r["total_reads"] for r in hot_rows[:topk])
             topk_repeat_mt = sum(r["repeat_multi_thread_reads"] for r in hot_rows[:topk])
             stats["read_trace_hot_nodes_topk"] = int(topk)
@@ -649,7 +687,7 @@ def parse_read_trace(read_trace_csv, window_ms_list):
                 float(topk_repeat_mt / total_reads) if total_reads else 0.0
             )
 
-    return stats, t0
+    return stats, t0, artifacts
 
 
 def parse_thread_timeline_windows(thread_timeline_csv, window_ms_list, window_start_ns=None):
@@ -881,7 +919,7 @@ def parse_topk_files(base_prefix, node_counts_csv):
     return topk_rows, {}
 
 
-def _process_one_summary_file(summary_file, read_trace_window_ms_list):
+def _process_one_summary_file(summary_file, read_trace_window_ms_list, cleanup=False):
     """
     Module-level function to process a single summary_stats.csv file.
     This must be at module level (not nested) to be pickleable by multiprocessing.Pool.
@@ -893,6 +931,8 @@ def _process_one_summary_file(summary_file, read_trace_window_ms_list):
     Returns:
         Dict with processing results
     """
+    global _CURRENT_SUMMARY_FILE
+    _CURRENT_SUMMARY_FILE = summary_file
     try:
         df = pd.read_csv(summary_file)
         if df.empty:
@@ -918,10 +958,15 @@ def _process_one_summary_file(summary_file, read_trace_window_ms_list):
         pidstat_stats = parse_pidstat_log(pidstat_log)
         wa_stats = parse_wa_log(wa_log)
         thread_timeline_stats = parse_thread_timeline(thread_timeline_csv)
-        read_trace_stats, read_trace_t0_ns = parse_read_trace(
+        read_trace_stats, read_trace_t0_ns, read_trace_artifacts = parse_read_trace(
             read_trace_csv,
             window_ms_list=read_trace_window_ms_list,
         )
+        # node/hot 統計檔在 collect 階段後續不再使用，可立即刪除
+        if cleanup:
+            for p in read_trace_artifacts.get("node_stats_paths", []):
+                _safe_remove_file(p)
+            _safe_remove_file(read_trace_artifacts.get("hot_nodes_path", ""))
 
         extra_cols = {
             "run_prefix": os.path.basename(base_prefix),
@@ -942,7 +987,7 @@ def _process_one_summary_file(summary_file, read_trace_window_ms_list):
         extra_cols.update(read_trace_stats)
         extra_cols.update(topk_summary)
         if read_trace_t0_ns is not None and os.path.isfile(thread_timeline_csv):
-            _window_latency_paths, window_latency_frames = parse_thread_timeline_windows(
+            window_latency_paths, window_latency_frames = parse_thread_timeline_windows(
                 thread_timeline_csv,
                 window_ms_list=read_trace_window_ms_list,
                 window_start_ns=read_trace_t0_ns,
@@ -953,9 +998,29 @@ def _process_one_summary_file(summary_file, read_trace_window_ms_list):
             )
             extra_cols["thread_timeline_window_ms_list"] = window_list_str
             for window_label, latency_df in window_latency_frames.items():
-                read_trace_window_path = f"{base_prefix}_read_trace_window_{window_label}ms_stats.csv"
+                read_trace_window_path = read_trace_artifacts.get("window_stats_paths", {}).get(
+                    window_label,
+                    f"{base_prefix}_read_trace_window_{window_label}ms_stats.csv",
+                )
                 corr_stats = compute_window_correlations(read_trace_window_path, latency_df, window_label)
                 extra_cols.update(corr_stats)
+                if cleanup:
+                    _safe_remove_file(read_trace_window_path)
+                    _safe_remove_file(window_latency_paths.get(window_label, ""))
+        elif cleanup:
+            # 沒做 correlation 的情況下，window stats 與 latency window 檔也可立即刪除
+            for p in read_trace_artifacts.get("window_stats_paths", {}).values():
+                _safe_remove_file(p)
+            base_prefix = summary_file[: -len("_summary_stats.csv")]
+            for window_ms in _parse_window_ms_list(read_trace_window_ms_list):
+                window_label = _window_label(window_ms)
+                latency_path = f"{base_prefix}_thread_timeline_window_{window_label}ms_latency.csv"
+                _safe_remove_file(latency_path)
+
+        if cleanup:
+            # 保險：刪除尚未被逐窗清掉的 read_trace window stats
+            for p in read_trace_artifacts.get("window_stats_paths", {}).values():
+                _safe_remove_file(p)
 
         rows = df.to_dict(orient="records")
         extra_keys = list(extra_cols.keys())
@@ -983,9 +1048,11 @@ def _process_one_summary_file(summary_file, read_trace_window_ms_list):
             "extra_cols": [],
             "topk_rows": [],
         }
+    finally:
+        _CURRENT_SUMMARY_FILE = ""
 
 
-def collect_summary_stats(search_dir, output_file=None, verbose=False, workers=None):
+def collect_summary_stats(search_dir, output_file=None, verbose=False, workers=None, cleanup=False):
     """
     蒐集所有 summary_stats.csv 並彙總到一個檔案
     
@@ -994,6 +1061,7 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False, workers=N
     output_file: 彙總輸出檔案路徑 (為空則不寫檔)
         verbose: 是否顯示詳細資訊
         workers: Number of worker processes for parallelization (None = auto-detect from COLLECT_WORKERS env var)
+        cleanup: 若為 True，於每個 summary 檔處理完成後立即刪除 collect 產生的中間檔
     
     Returns:
         combined_df, topk_data
@@ -1027,8 +1095,11 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False, workers=N
         ctx = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context("spawn")
         with ctx.Pool(processes=workers) as pool:
             # Use functools.partial to bind read_trace_window_ms_list to each call
-            process_func = functools.partial(_process_one_summary_file, 
-                                            read_trace_window_ms_list=read_trace_window_ms_list)
+            process_func = functools.partial(
+                _process_one_summary_file,
+                read_trace_window_ms_list=read_trace_window_ms_list,
+                cleanup=cleanup,
+            )
             # Use tqdm progress bar
             results = list(tqdm(
                 pool.imap(process_func, summary_files),
@@ -1040,7 +1111,7 @@ def collect_summary_stats(search_dir, output_file=None, verbose=False, workers=N
     else:
         # Single-threaded with progress bar
         results = [
-            _process_one_summary_file(sf, read_trace_window_ms_list)
+            _process_one_summary_file(sf, read_trace_window_ms_list, cleanup=cleanup)
             for sf in tqdm(summary_files, desc="處理檔案", unit="file", disable=verbose)
         ]
     
@@ -1128,7 +1199,7 @@ def main():
     parser.add_argument(
         "--cleanup",
         action="store_true",
-        help="運行完成後清理所有中間統計檔案"
+        help="每個 summary 檔處理完成後立即清理 collect 產生的中間統計檔案"
     )
     
     args = parser.parse_args()
@@ -1165,7 +1236,13 @@ def main():
         print("-" * 60)
     
     # 執行蒐集
-    summary_df, topk_data = collect_summary_stats(search_dir, output_file=None, verbose=args.verbose, workers=args.workers)
+    summary_df, topk_data = collect_summary_stats(
+        search_dir,
+        output_file=None,
+        verbose=args.verbose,
+        workers=args.workers,
+        cleanup=args.cleanup,
+    )
     if summary_df is None or summary_df.empty:
         sys.exit(1)
 
@@ -1243,35 +1320,6 @@ def main():
 
     final_df.to_csv(output_file, index=False)
     print(f"✓ 完整彙總：{output_file} ({len(final_df)} 行, {len(final_df.columns)} 列)")
-    
-    # 清理中間檔案（如果需要）
-    if args.cleanup:
-        if args.verbose:
-            print("\n清理中間檔案...")
-        
-        cleanup_count = 0
-        # 找所有中間統計檔案
-        cleanup_files = []
-        for root, dirs, files in os.walk(search_dir):
-            for file in files:
-                if file.endswith("_read_trace_window_") or "_read_trace_window_" in file and file.endswith("ms_stats.csv"):
-                    cleanup_files.append(os.path.join(root, file))
-                elif file.endswith("_node_stats.csv"):
-                    cleanup_files.append(os.path.join(root, file))
-        
-        # 使用進度條刪除檔案
-        for file_path in tqdm(cleanup_files, desc="清理中間檔案", unit="file", disable=args.verbose):
-            try:
-                os.remove(file_path)
-                cleanup_count += 1
-                if args.verbose:
-                    print(f"  已刪除: {file_path}")
-            except Exception as e:
-                if args.verbose:
-                    print(f"  無法刪除 {file_path}: {e}", file=sys.stderr)
-        
-        if cleanup_count > 0:
-            print(f"✓ 清理完成：已刪除 {cleanup_count} 個中間檔案")
     
     # 顯示統計資訊
     if args.verbose:
