@@ -1031,6 +1031,7 @@ def _process_one_summary_file(summary_file, read_trace_window_ms_list, cleanup=F
                 "timing": timing_stats,
             }
         base_prefix = summary_file[: -len("_summary_stats.csv")]
+        index_tag = extract_index_info(summary_file)
         expanded_csv = f"{base_prefix}_expanded_nodes.csv"
         node_counts_csv = f"{base_prefix}_node_counts.csv"
         iostat_log = f"{base_prefix}_iostat.log"
@@ -1072,6 +1073,7 @@ def _process_one_summary_file(summary_file, read_trace_window_ms_list, cleanup=F
 
         extra_cols = {
             "run_prefix": os.path.basename(base_prefix),
+            "index_tag": index_tag,
             "summary_stats_path": summary_file,
             "expanded_nodes_path": expanded_csv if os.path.isfile(expanded_csv) else "",
             "node_counts_path": node_counts_csv if os.path.isfile(node_counts_csv) else "",
@@ -1133,6 +1135,7 @@ def _process_one_summary_file(summary_file, read_trace_window_ms_list, cleanup=F
 
         for row in topk_rows:
             row["run_prefix"] = os.path.basename(base_prefix)
+            row["index_tag"] = index_tag
             row["summary_stats_path"] = summary_file
         timing_stats["assemble_rows"] = time.perf_counter() - t0
         timing_stats["total"] = time.perf_counter() - t0_total
@@ -1317,6 +1320,7 @@ def _process_one_summary_patch(summary_file, read_trace_window_ms_list):
     try:
         base_prefix = summary_file[: -len("_summary_stats.csv")]
         run_prefix = os.path.basename(base_prefix)
+        index_tag = extract_index_info(summary_file)
         read_trace_csv = f"{base_prefix}_read_trace.csv"
         thread_timeline_csv = f"{base_prefix}_thread_timeline.csv"
         labels = [_window_label(v) for v in _parse_window_ms_list(read_trace_window_ms_list)]
@@ -1326,7 +1330,7 @@ def _process_one_summary_patch(summary_file, read_trace_window_ms_list):
             window_ms_list=read_trace_window_ms_list,
             emit_intermediate=False,
         )
-        patch = {"run_prefix": run_prefix}
+        patch = {"run_prefix": run_prefix, "index_tag": index_tag}
 
         for k, v in read_trace_stats.items():
             if any(f"_ms{lbl}" in k for lbl in labels):
@@ -1375,8 +1379,17 @@ def patch_window_columns(
     if "run_prefix" not in base_df.columns:
         raise SystemExit(f"錯誤: {input_csv} 缺少 run_prefix 欄位，無法 patch")
 
-    target_run_prefixes = [rp for rp in base_df["run_prefix"].astype(str).unique() if rp in summary_by_run_prefix]
-    target_files = [summary_by_run_prefix[rp] for rp in target_run_prefixes]
+    use_index_tag = "index_tag" in base_df.columns
+    if use_index_tag:
+        keys = set(zip(base_df["run_prefix"].astype(str), base_df["index_tag"].astype(str)))
+        target_files = []
+        for rp, it in keys:
+            s = summary_by_run_prefix.get(rp)
+            if s and extract_index_info(s) == it:
+                target_files.append(s)
+    else:
+        target_run_prefixes = [rp for rp in base_df["run_prefix"].astype(str).unique() if rp in summary_by_run_prefix]
+        target_files = [summary_by_run_prefix[rp] for rp in target_run_prefixes]
     if not target_files:
         raise SystemExit("錯誤: 目標 CSV 與 search_dir 沒有可對應的 run_prefix")
 
@@ -1421,8 +1434,13 @@ def patch_window_columns(
     if not patch_rows:
         raise SystemExit("錯誤: 沒有可寫入的 patch 欄位資料")
 
-    patch_df = pd.DataFrame(patch_rows).drop_duplicates(subset=["run_prefix"], keep="last")
-    merged = base_df.merge(patch_df, on="run_prefix", how="left", suffixes=("", "_patch"))
+    patch_df = pd.DataFrame(patch_rows)
+    if use_index_tag and "index_tag" in patch_df.columns:
+        patch_df = patch_df.drop_duplicates(subset=["run_prefix", "index_tag"], keep="last")
+        merged = base_df.merge(patch_df, on=["run_prefix", "index_tag"], how="left", suffixes=("", "_patch"))
+    else:
+        patch_df = patch_df.drop_duplicates(subset=["run_prefix"], keep="last")
+        merged = base_df.merge(patch_df, on="run_prefix", how="left", suffixes=("", "_patch"))
 
     # 若原欄位已存在，覆蓋為 patch 值（非空）
     for c in list(merged.columns):

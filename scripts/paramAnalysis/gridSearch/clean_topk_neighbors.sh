@@ -48,11 +48,10 @@ echo ""
 # 2. *_topk*_nodes.txt  
 # 3. *_topk*_neighbors.csv
 
-files_to_delete=(
-    $(find "$SEARCH_DIR" -name "*_node_counts.csv" -type f 2>/dev/null)
-    $(find "$SEARCH_DIR" -name "*_topk*_nodes.txt" -type f 2>/dev/null)
-    $(find "$SEARCH_DIR" -name "*_topk*_neighbors.csv" -type f 2>/dev/null)
-)
+files_to_delete=()
+while IFS= read -r -d '' f; do
+    files_to_delete+=("$f")
+done < <(find "$SEARCH_DIR" -type f \( -name "*_node_counts.csv" -o -name "*_topk*_nodes.txt" -o -name "*_topk*_neighbors.csv" \) -print0 2>/dev/null)
 
 if [[ ${#files_to_delete[@]} -eq 0 ]]; then
     echo "✓ 沒有找到要刪除的檔案"

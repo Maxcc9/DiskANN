@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 
 DEFAULT_KEY_COLS = [
+    "index_tag",
     "build_R",
     "build_L",
     "search_K",

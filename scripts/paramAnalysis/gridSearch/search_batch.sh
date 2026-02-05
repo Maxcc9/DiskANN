@@ -100,6 +100,9 @@ USAGE
 
 [[ ${1:-} == "-h" || ${1:-} == "--help" ]] && { usage; exit 0; }
 
+# 提前設置 EXIT 陷阱，避免中途退出時遺留背景監測程序
+trap cleanup_bg_processes EXIT
+
 # 基礎路徑設定
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISKANN_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -617,8 +620,5 @@ echo ""
 echo "=========================================="
 echo "批次搜尋完成，結果位於: $OUTPUT_DIR"
 echo "=========================================="
-
-# 設定 EXIT 陷阱以確保清理
-trap cleanup_bg_processes EXIT
 
 exit $fail
