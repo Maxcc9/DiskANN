@@ -3,6 +3,7 @@
 
 #include "common_includes.h"
 #include <boost/program_options.hpp>
+#include <limits>
 
 #include "index.h"
 #include "disk_utils.h"
@@ -53,7 +54,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       const uint32_t num_threads, const uint32_t recall_at, const uint32_t beamwidth,
                       const uint32_t num_nodes_to_cache, const uint32_t search_io_limit,
                       const std::vector<uint32_t> &Lvec, const float fail_if_recall_below,
-                      const std::vector<std::string> &query_filters, const bool use_reorder_data = false)
+                      const std::vector<std::string> &query_filters, const bool use_reorder_data = false,
+                      const float et_theta = std::numeric_limits<float>::max(), const float et_dk = 0.0f,
+                      const uint32_t hop_budget = std::numeric_limits<uint32_t>::max())
 {
     diskann::cout << "Search parameters: #threads: " << num_threads << ", ";
     if (beamwidth <= 0)
@@ -168,7 +171,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         {
             _pFlashIndex->cached_beam_search(warmup + (i * warmup_aligned_dim), 1, warmup_L,
                                              warmup_result_ids_64.data() + (i * 1),
-                                             warmup_result_dists.data() + (i * 1), 4);
+                                             warmup_result_dists.data() + (i * 1), 4, et_theta, et_dk, hop_budget);
         }
         diskann::cout << "..done" << std::endl;
     }
@@ -232,7 +235,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                 _pFlashIndex->cached_beam_search(query + (i * query_aligned_dim), recall_at, L,
                                                  query_result_ids_64.data() + (i * recall_at),
                                                  query_result_dists[test_id].data() + (i * recall_at),
-                                                 optimized_beamwidth, use_reorder_data, stats + i);
+                                                 optimized_beamwidth, et_theta, et_dk, hop_budget, use_reorder_data,
+                                                 stats + i);
             }
             else
             {
@@ -248,7 +252,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                 _pFlashIndex->cached_beam_search(
                     query + (i * query_aligned_dim), recall_at, L, query_result_ids_64.data() + (i * recall_at),
                     query_result_dists[test_id].data() + (i * recall_at), optimized_beamwidth, true, label_for_search,
-                    use_reorder_data, stats + i);
+                    et_theta, et_dk, hop_budget, use_reorder_data, stats + i);
             }
         }
         auto e = std::chrono::high_resolution_clock::now();
@@ -321,6 +325,9 @@ int main(int argc, char **argv)
     std::vector<uint32_t> Lvec;
     bool use_reorder_data = false;
     float fail_if_recall_below = 0.0f;
+    float et_theta = 1e9f;
+    float et_dk = 0.0f;
+    uint32_t hop_budget = std::numeric_limits<uint32_t>::max();
 
     po::options_description desc{
         program_options_utils::make_program_description("search_disk_index", "Searches on-disk DiskANN indexes")};
@@ -375,6 +382,13 @@ int main(int argc, char **argv)
         optional_configs.add_options()("fail_if_recall_below",
                                        po::value<float>(&fail_if_recall_below)->default_value(0.0f),
                                        program_options_utils::FAIL_IF_RECALL_BELOW);
+        optional_configs.add_options()("et_theta", po::value<float>(&et_theta)->default_value(1e9f),
+                                       "Early termination theta. Default value: 1e9");
+        optional_configs.add_options()("et_dk", po::value<float>(&et_dk)->default_value(0.0f),
+                                       "Early termination additive margin. Default value: 0.0");
+        optional_configs.add_options()(
+            "hop_budget", po::value<uint32_t>(&hop_budget)->default_value(std::numeric_limits<uint32_t>::max()),
+            "Early termination hop budget. Default value: uint32::max()");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -454,15 +468,18 @@ int main(int argc, char **argv)
             if (data_type == std::string("float"))
                 return search_disk_index<float, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
+                    et_theta, et_dk, hop_budget);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
+                    et_theta, et_dk, hop_budget);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
+                    et_theta, et_dk, hop_budget);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;
@@ -474,15 +491,18 @@ int main(int argc, char **argv)
             if (data_type == std::string("float"))
                 return search_disk_index<float>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                 num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                fail_if_recall_below, query_filters, use_reorder_data);
+                                                fail_if_recall_below, query_filters, use_reorder_data, et_theta,
+                                                et_dk, hop_budget);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                  num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                 fail_if_recall_below, query_filters, use_reorder_data);
+                                                 fail_if_recall_below, query_filters, use_reorder_data, et_theta,
+                                                 et_dk, hop_budget);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                   num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                  fail_if_recall_below, query_filters, use_reorder_data);
+                                                  fail_if_recall_below, query_filters, use_reorder_data, et_theta,
+                                                  et_dk, hop_budget);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;

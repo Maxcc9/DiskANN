@@ -3,6 +3,7 @@
 
 #pragma once
 #include "common_includes.h"
+#include <limits>
 
 #include "aligned_file_reader.h"
 #include "concurrent_queue.h"
@@ -63,22 +64,34 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
 
     DISKANN_DLLEXPORT void cached_beam_search(const T *query, const uint64_t k_search, const uint64_t l_search,
                                               uint64_t *res_ids, float *res_dists, const uint64_t beam_width,
+                                              const float et_theta = std::numeric_limits<float>::max(),
+                                              const float et_dk = 0.0f,
+                                              const uint32_t hop_budget = std::numeric_limits<uint32_t>::max(),
                                               const bool use_reorder_data = false, QueryStats *stats = nullptr);
 
     DISKANN_DLLEXPORT void cached_beam_search(const T *query, const uint64_t k_search, const uint64_t l_search,
                                               uint64_t *res_ids, float *res_dists, const uint64_t beam_width,
                                               const bool use_filter, const LabelT &filter_label,
+                                              const float et_theta = std::numeric_limits<float>::max(),
+                                              const float et_dk = 0.0f,
+                                              const uint32_t hop_budget = std::numeric_limits<uint32_t>::max(),
                                               const bool use_reorder_data = false, QueryStats *stats = nullptr);
 
     DISKANN_DLLEXPORT void cached_beam_search(const T *query, const uint64_t k_search, const uint64_t l_search,
                                               uint64_t *res_ids, float *res_dists, const uint64_t beam_width,
-                                              const uint32_t io_limit, const bool use_reorder_data = false,
+                                              const uint32_t io_limit, const float et_theta = std::numeric_limits<float>::max(),
+                                              const float et_dk = 0.0f,
+                                              const uint32_t hop_budget = std::numeric_limits<uint32_t>::max(),
+                                              const bool use_reorder_data = false,
                                               QueryStats *stats = nullptr);
 
     DISKANN_DLLEXPORT void cached_beam_search(const T *query, const uint64_t k_search, const uint64_t l_search,
                                               uint64_t *res_ids, float *res_dists, const uint64_t beam_width,
                                               const bool use_filter, const LabelT &filter_label,
-                                              const uint32_t io_limit, const bool use_reorder_data = false,
+                                              const uint32_t io_limit, const float et_theta = std::numeric_limits<float>::max(),
+                                              const float et_dk = 0.0f,
+                                              const uint32_t hop_budget = std::numeric_limits<uint32_t>::max(),
+                                              const bool use_reorder_data = false,
                                               QueryStats *stats = nullptr);
 
     DISKANN_DLLEXPORT LabelT get_converted_label(const std::string &filter_label);

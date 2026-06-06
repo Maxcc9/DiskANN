@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <limits>
 #include <mutex>
 #include <vector>
 #include "utils.h"
@@ -107,6 +108,16 @@ class NeighborPriorityQueue
     bool has_unexpanded_node() const
     {
         return _cur < _size;
+    }
+
+    float peek_unexpanded_dist() const
+    {
+        return (_cur < _size) ? _data[_cur].distance : std::numeric_limits<float>::max();
+    }
+
+    float best_dist() const
+    {
+        return (_size > 0) ? _data[0].distance : std::numeric_limits<float>::max();
     }
 
     size_t size() const
