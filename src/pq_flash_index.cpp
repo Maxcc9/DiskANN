@@ -326,8 +326,8 @@ void PQFlashIndex<T, LabelT>::generate_cache_list_from_sample_queries(std::strin
         // concurrently update the node_visit_counter to track most visited nodes. The last false is to not use the
         // "use_reorder_data" option which enables a final reranking if the disk index itself contains only PQ data.
         cached_beam_search(samples + (i * sample_aligned_dim), 1, l_search, tmp_result_ids_64.data() + i,
-                           tmp_result_dists.data() + i, beamwidth, std::numeric_limits<float>::max(), 0.0f,
-                           std::numeric_limits<uint32_t>::max(), filtered_search, label_for_search, false);
+                           tmp_result_dists.data() + i, beamwidth, filtered_search, label_for_search,
+                           std::numeric_limits<float>::max(), 0.0f, std::numeric_limits<uint32_t>::max(), false);
     }
 
     std::sort(this->_node_visit_counter.begin(), _node_visit_counter.end(),
@@ -1422,10 +1422,15 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     while (retset.has_unexpanded_node() && num_ios < io_limit)
     {
         const float frontier_dist = retset.peek_unexpanded_dist();
-        const float best_dist = retset.best_dist();
-        if (best_dist > 1e-9f && frontier_dist > et_theta * best_dist + et_dk)
+        if (retset.size() >= k_search)
         {
-            break;
+            // Compare against k-th best (worst of current top-k), not the absolute best.
+            // This avoids premature termination when k > 1.
+            const float kth_dist = retset[k_search - 1].distance;
+            if (kth_dist > 1e-9f && frontier_dist > et_theta * kth_dist + et_dk)
+            {
+                break;
+            }
         }
         if (hops >= hop_budget)
         {
