@@ -327,7 +327,7 @@ void PQFlashIndex<T, LabelT>::generate_cache_list_from_sample_queries(std::strin
         // "use_reorder_data" option which enables a final reranking if the disk index itself contains only PQ data.
         cached_beam_search(samples + (i * sample_aligned_dim), 1, l_search, tmp_result_ids_64.data() + i,
                            tmp_result_dists.data() + i, beamwidth, filtered_search, label_for_search,
-                           std::numeric_limits<float>::max(), 0.0f, std::numeric_limits<uint32_t>::max(), false);
+                           std::numeric_limits<float>::max(), 0.0f, std::numeric_limits<uint32_t>::max(), 1.0f, 0, false);
     }
 
     std::sort(this->_node_visit_counter.begin(), _node_visit_counter.end(),
@@ -1239,10 +1239,11 @@ template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const float et_theta, const float et_dk, const uint32_t hop_budget,
+                                                 const float et_sat_gamma, const uint32_t et_sat_delta,
                                                  const bool use_reorder_data, QueryStats *stats)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, std::numeric_limits<uint32_t>::max(),
-                       et_theta, et_dk, hop_budget, use_reorder_data, stats);
+                       et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
@@ -1250,22 +1251,25 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const bool use_filter, const LabelT &filter_label,
                                                  const float et_theta, const float et_dk, const uint32_t hop_budget,
+                                                 const float et_sat_gamma, const uint32_t et_sat_delta,
                                                  const bool use_reorder_data, QueryStats *stats)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, use_filter, filter_label,
-                       std::numeric_limits<uint32_t>::max(), et_theta, et_dk, hop_budget, use_reorder_data, stats);
+                       std::numeric_limits<uint32_t>::max(), et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta,
+                       use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const uint32_t io_limit, const float et_theta, const float et_dk,
-                                                 const uint32_t hop_budget, const bool use_reorder_data,
+                                                 const uint32_t hop_budget, const float et_sat_gamma,
+                                                 const uint32_t et_sat_delta, const bool use_reorder_data,
                                                  QueryStats *stats)
 {
     LabelT dummy_filter = 0;
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, false, dummy_filter, io_limit,
-                       et_theta, et_dk, hop_budget, use_reorder_data, stats);
+                       et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
@@ -1273,7 +1277,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const bool use_filter, const LabelT &filter_label,
                                                  const uint32_t io_limit, const float et_theta, const float et_dk,
-                                                 const uint32_t hop_budget, const bool use_reorder_data,
+                                                 const uint32_t hop_budget, const float et_sat_gamma,
+                                                 const uint32_t et_sat_delta, const bool use_reorder_data,
                                                  QueryStats *stats)
 {
 
@@ -1408,6 +1413,10 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     uint32_t cmps = 0;
     uint32_t hops = 0;
     uint32_t num_ios = 0;
+
+    // Top-k saturation state: track prev top-k IDs to detect convergence
+    std::vector<uint32_t> sat_prev_ids(k_search, std::numeric_limits<uint32_t>::max());
+    uint32_t sat_count = 0;
 
     // cleared every iteration
     std::vector<uint32_t> frontier;
@@ -1628,6 +1637,31 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             }
         }
 
+        // Top-k saturation check (Patience style): terminate if top-k IDs stable for et_sat_delta hops
+        if (et_sat_delta > 0 && retset.size() >= k_search)
+        {
+            uint32_t overlap = 0;
+            for (size_t i = 0; i < k_search; i++)
+            {
+                uint32_t curr = retset[i].id;
+                for (size_t j = 0; j < k_search; j++)
+                {
+                    if (curr == sat_prev_ids[j]) { overlap++; break; }
+                }
+            }
+            if ((float)overlap / (float)k_search >= et_sat_gamma)
+                sat_count++;
+            else
+                sat_count = 0;
+            for (size_t i = 0; i < k_search; i++)
+                sat_prev_ids[i] = retset[i].id;
+            if (sat_count >= et_sat_delta)
+            {
+                hops++;
+                break;
+            }
+        }
+
         hops++;
     }
 
@@ -1743,7 +1777,7 @@ uint32_t PQFlashIndex<T, LabelT>::range_search(const T *query1, const double ran
             x = std::numeric_limits<float>::max();
         this->cached_beam_search(query1, l_search, l_search, indices.data(), distances.data(), cur_bw,
                                  std::numeric_limits<float>::max(), 0.0f, std::numeric_limits<uint32_t>::max(),
-                                 false, stats);
+                                 1.0f, 0, false, stats);
         for (uint32_t i = 0; i < l_search; i++)
         {
             if (distances[i] > (float)range)
