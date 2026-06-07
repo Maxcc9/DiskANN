@@ -183,7 +183,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 
     std::string recall_string = "Recall@" + std::to_string(recall_at);
     diskann::cout << std::setw(6) << "L" << std::setw(12) << "Beamwidth" << std::setw(16) << "QPS" << std::setw(16)
-                  << "Mean Latency" << std::setw(16) << "99.9 Latency" << std::setw(16) << "Mean IOs" << std::setw(16)
+                  << "Mean Latency" << std::setw(16) << "P50 Latency" << std::setw(16) << "P99 Latency"
+                  << std::setw(16) << "99.9 Latency" << std::setw(16) << "Mean IOs" << std::setw(16)
                   << "Mean IO (us)" << std::setw(16) << "CPU (s)";
     if (calc_recall_flag)
     {
@@ -270,6 +271,12 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         auto latency_999 = diskann::get_percentile_stats<float>(
             stats, query_num, 0.999, [](const diskann::QueryStats &stats) { return stats.total_us; });
 
+        auto latency_50 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.500, [](const diskann::QueryStats &stats) { return stats.total_us; });
+
+        auto latency_99 = diskann::get_percentile_stats<float>(
+            stats, query_num, 0.990, [](const diskann::QueryStats &stats) { return stats.total_us; });
+
         auto mean_ios = diskann::get_mean_stats<uint32_t>(stats, query_num,
                                                           [](const diskann::QueryStats &stats) { return stats.n_ios; });
 
@@ -288,8 +295,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         }
 
         diskann::cout << std::setw(6) << L << std::setw(12) << optimized_beamwidth << std::setw(16) << qps
-                      << std::setw(16) << mean_latency << std::setw(16) << latency_999 << std::setw(16) << mean_ios
-                      << std::setw(16) << mean_io_us << std::setw(16) << mean_cpuus;
+                      << std::setw(16) << mean_latency << std::setw(16) << latency_50 << std::setw(16) << latency_99
+                      << std::setw(16) << latency_999 << std::setw(16) << mean_ios << std::setw(16) << mean_io_us
+                      << std::setw(16) << mean_cpuus;
         if (calc_recall_flag)
         {
             diskann::cout << std::setw(16) << recall << std::endl;
