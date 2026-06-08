@@ -125,8 +125,8 @@ template <typename T> class SearchServer
 {
   public:
     SearchServer(const std::string &index_prefix, const diskann::Metric metric, const uint32_t num_nodes_to_cache,
-                 const uint32_t num_threads, const uint32_t beamwidth)
-        : _beamwidth(beamwidth)
+                 const uint32_t num_threads, const uint32_t beamwidth, const float frontier_divergence_k)
+        : _beamwidth(beamwidth), _frontier_divergence_k(frontier_divergence_k)
     {
 #ifdef _WINDOWS
         static_assert(false, "search_server is currently implemented for POSIX platforms only.");
@@ -318,7 +318,8 @@ template <typename T> class SearchServer
         if (request.et_theta > 0.0f)
         {
             _index->cached_beam_search(query.data(), request.k, request.l, result_ids.data(), result_dists.data(),
-                                       _beamwidth, request.et_theta);
+                                       _beamwidth, request.et_theta, 0.0f,
+                                       std::numeric_limits<uint32_t>::max(), 1.0f, 0, _frontier_divergence_k);
         }
         else
         {
@@ -351,6 +352,7 @@ template <typename T> class SearchServer
     std::unique_ptr<diskann::PQFlashIndex<T>> _index;
     uint64_t _dimensions = 0;
     uint32_t _beamwidth = 4;
+    float _frontier_divergence_k = 0.4f;
 
     std::queue<int> _fd_queue;
     std::mutex _queue_mutex;
@@ -361,9 +363,10 @@ template <typename T> class SearchServer
 template <typename T>
 int run_search_server(const std::string &index_path_prefix, const diskann::Metric metric,
                       const uint32_t num_nodes_to_cache, const uint32_t num_threads, const uint32_t beamwidth,
-                      const uint16_t port)
+                      const float frontier_divergence_k, const uint16_t port)
 {
-    SearchServer<T> server(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth);
+    SearchServer<T> server(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
+                            frontier_divergence_k);
     server.serve(port, num_threads);
     return 0;
 }
@@ -379,6 +382,7 @@ int main(int argc, char **argv)
     uint32_t num_threads = static_cast<uint32_t>(omp_get_num_procs());
     uint32_t num_nodes_to_cache = 0;
     uint32_t beamwidth = 4;
+    float frontier_divergence_k = 0.4f;
 
     po::options_description desc{"Arguments"};
     try
@@ -397,6 +401,9 @@ int main(int argc, char **argv)
                            "Number of nodes to cache during search");
         desc.add_options()("beamwidth", po::value<uint32_t>(&beamwidth)->default_value(4),
                            "Beamwidth used for each search");
+        desc.add_options()("frontier_divergence_k",
+                           po::value<float>(&frontier_divergence_k)->default_value(0.4f),
+                           "PQ Divergence Rate coefficient for adaptive ET (0=disabled, 0.4=recommended)");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -433,17 +440,17 @@ int main(int argc, char **argv)
         if (data_type == "float")
         {
             return run_search_server<float>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                            port);
+                                            frontier_divergence_k, port);
         }
         if (data_type == "int8")
         {
             return run_search_server<int8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                             port);
+                                             frontier_divergence_k, port);
         }
         if (data_type == "uint8")
         {
             return run_search_server<uint8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                               port);
+                                               frontier_divergence_k, port);
         }
 
         std::cerr << "Unsupported data type " << data_type << std::endl;

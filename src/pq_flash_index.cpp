@@ -327,7 +327,8 @@ void PQFlashIndex<T, LabelT>::generate_cache_list_from_sample_queries(std::strin
         // "use_reorder_data" option which enables a final reranking if the disk index itself contains only PQ data.
         cached_beam_search(samples + (i * sample_aligned_dim), 1, l_search, tmp_result_ids_64.data() + i,
                            tmp_result_dists.data() + i, beamwidth, filtered_search, label_for_search,
-                           std::numeric_limits<float>::max(), 0.0f, std::numeric_limits<uint32_t>::max(), 1.0f, 0, false);
+                           std::numeric_limits<float>::max(), 0.0f, std::numeric_limits<uint32_t>::max(), 1.0f, 0,
+                           0.0f, false);
     }
 
     std::sort(this->_node_visit_counter.begin(), _node_visit_counter.end(),
@@ -1240,10 +1241,12 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const float et_theta, const float et_dk, const uint32_t hop_budget,
                                                  const float et_sat_gamma, const uint32_t et_sat_delta,
-                                                 const bool use_reorder_data, QueryStats *stats)
+                                                 const float frontier_divergence_k, const bool use_reorder_data,
+                                                 QueryStats *stats)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, std::numeric_limits<uint32_t>::max(),
-                       et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, use_reorder_data, stats);
+                       et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, frontier_divergence_k,
+                       use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
@@ -1252,11 +1255,12 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  const bool use_filter, const LabelT &filter_label,
                                                  const float et_theta, const float et_dk, const uint32_t hop_budget,
                                                  const float et_sat_gamma, const uint32_t et_sat_delta,
-                                                 const bool use_reorder_data, QueryStats *stats)
+                                                 const float frontier_divergence_k, const bool use_reorder_data,
+                                                 QueryStats *stats)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, use_filter, filter_label,
                        std::numeric_limits<uint32_t>::max(), et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta,
-                       use_reorder_data, stats);
+                       frontier_divergence_k, use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
@@ -1264,12 +1268,13 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const uint32_t io_limit, const float et_theta, const float et_dk,
                                                  const uint32_t hop_budget, const float et_sat_gamma,
-                                                 const uint32_t et_sat_delta, const bool use_reorder_data,
-                                                 QueryStats *stats)
+                                                 const uint32_t et_sat_delta, const float frontier_divergence_k,
+                                                 const bool use_reorder_data, QueryStats *stats)
 {
     LabelT dummy_filter = 0;
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, false, dummy_filter, io_limit,
-                       et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, use_reorder_data, stats);
+                       et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, frontier_divergence_k,
+                       use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
@@ -1278,8 +1283,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  const bool use_filter, const LabelT &filter_label,
                                                  const uint32_t io_limit, const float et_theta, const float et_dk,
                                                  const uint32_t hop_budget, const float et_sat_gamma,
-                                                 const uint32_t et_sat_delta, const bool use_reorder_data,
-                                                 QueryStats *stats)
+                                                 const uint32_t et_sat_delta, const float frontier_divergence_k,
+                                                 const bool use_reorder_data, QueryStats *stats)
 {
 
     uint64_t num_sector_per_nodes = DIV_ROUND_UP(_max_node_len, defaults::SECTOR_LEN);
@@ -1414,6 +1419,10 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     uint32_t hops = 0;
     uint32_t num_ios = 0;
 
+    // Method 3 + PQ-DR adaptive stop state.
+    float _pqdr_prev_ratio = 0.0f;
+    float _pqdr_ema = 0.0f;
+
     // Top-k saturation state: track prev top-k IDs to detect convergence
     std::vector<uint32_t> sat_prev_ids(k_search, std::numeric_limits<uint32_t>::max());
     uint32_t sat_count = 0;
@@ -1430,15 +1439,30 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 
     while (retset.has_unexpanded_node() && num_ios < io_limit)
     {
-        const float frontier_dist = retset.peek_unexpanded_dist();
-        if (retset.size() >= k_search)
+        // Method 3 + PQ-DR: stop when best-unexpanded PQ dist > kth_PQ * effective_theta.
+        // PQ Divergence Rate adapts effective_theta downward when the ratio is rising fast
+        // (frontier diverging -> oracle is near -> stop sooner). Zero extra I/O.
+        if (et_theta < std::numeric_limits<float>::max() && retset.size() >= k_search)
         {
-            // Compare against k-th best (worst of current top-k), not the absolute best.
-            // This avoids premature termination when k > 1.
-            const float kth_dist = retset[k_search - 1].distance;
-            if (kth_dist > 1e-9f && frontier_dist > et_theta * kth_dist + et_dk)
+            const float best_unexp_pq = retset.peek_unexpanded_dist();
+            const float kth_pq = retset[k_search - 1].distance;
+            if (kth_pq > 1e-9f)
             {
-                break;
+                float effective_theta = et_theta;
+                if (frontier_divergence_k > 0.0f)
+                {
+                    const float cur_ratio = best_unexp_pq / kth_pq;
+                    if (_pqdr_prev_ratio > 0.0f)
+                    {
+                        const float delta = cur_ratio - _pqdr_prev_ratio;
+                        _pqdr_ema = 0.5f * delta + 0.5f * _pqdr_ema;
+                        if (_pqdr_ema > 0.0f)
+                            effective_theta = std::max(1.0f, et_theta - frontier_divergence_k * _pqdr_ema);
+                    }
+                    _pqdr_prev_ratio = cur_ratio;
+                }
+                if (best_unexp_pq > kth_pq * effective_theta)
+                    break;
             }
         }
         if (hops >= hop_budget)
