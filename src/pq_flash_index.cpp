@@ -97,6 +97,10 @@ template <typename T, typename LabelT> PQFlashIndex<T, LabelT>::~PQFlashIndex()
     {
         delete[] _medoids;
     }
+    if (_full_nhood_preload_buf != nullptr)
+    {
+        delete[] _full_nhood_preload_buf;
+    }
 }
 
 template <typename T, typename LabelT> inline uint64_t PQFlashIndex<T, LabelT>::get_node_sector(uint64_t node_id)
@@ -1192,6 +1196,160 @@ int PQFlashIndex<T, LabelT>::load_from_separate_paths(uint32_t num_threads, cons
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// enable_neighbor_cache(): Phase-1 full preload
+// Scans the entire disk.index sector-by-sector and populates _nhood_cache
+// with every node's adjacency list.  After this call the beam-search loop
+// will hit _nhood_cache for every traversal node and issue zero graph I/Os.
+// ---------------------------------------------------------------------------
+template <typename T, typename LabelT>
+void PQFlashIndex<T, LabelT>::enable_neighbor_cache()
+{
+    if (!_load_flag)
+    {
+        diskann::cout << "[NeighborCache] Index not loaded yet; cannot preload neighbors." << std::endl;
+        return;
+    }
+
+    diskann::cout << "[NeighborCache] Initialising full-preload neighbor cache for "
+                  << _num_points << " nodes (max_degree=" << _max_degree << ") ..." << std::flush;
+
+    // Initialise the NeighborCache data structure.
+    _neighbor_cache.init(static_cast<uint32_t>(_num_points), static_cast<uint32_t>(_max_degree));
+
+    // Allocate a single sector-sized read buffer (reused across reads).
+    const uint64_t num_sectors_per_node =
+        _nnodes_per_sector > 0 ? 1 : DIV_ROUND_UP(_max_node_len, defaults::SECTOR_LEN);
+
+    // We read one "logical sector group" at a time (either a sector shared by
+    // multiple nodes, or one or more sectors belonging to a single large node).
+    // For multi-node-per-sector layout (nnodes_per_sector > 0) we iterate over
+    // graph sectors 1 … ceil(num_points / nnodes_per_sector).
+    // For multi-sector-per-node layout we iterate over each node individually.
+
+    char *sector_buf = nullptr;
+    alloc_aligned(reinterpret_cast<void **>(&sector_buf),
+                  num_sectors_per_node * defaults::SECTOR_LEN,
+                  defaults::SECTOR_LEN);
+
+    ScratchStoreManager<SSDThreadData<T>> manager(this->_thread_data);
+    auto thread_data = manager.scratch_space();
+    IOContext &ctx   = thread_data->ctx;
+
+    // Also allocate the backing buffer for _nhood_cache (if not already done).
+    // We use a separate large flat buffer owned by this function and stored as a
+    // class member so that the pointers in _nhood_cache remain valid.
+    //
+    // Design note: _nhood_cache_buf is already used by load_cache_list() for the
+    // BFS warm-up cache.  Rather than reusing that buffer (whose layout is
+    // arbitrary), we allocate a fresh contiguous block sized for ALL nodes and
+    // insert entries directly into _nhood_cache, overwriting any prior entries
+    // for the same node_id.  This is safe because _nhood_cache is only read
+    // during beam_search (single-writer at startup time).
+
+    // Allocate the full-preload nhood buffer: num_points × (max_degree+1) uint32_t
+    // (+1 because the DiskANN sector layout stores [nnbrs][id0][id1]…)
+    const size_t buf_elems = static_cast<size_t>(_num_points) * (_max_degree + 1);
+    uint32_t *full_nhood_buf = new uint32_t[buf_elems];
+    memset(full_nhood_buf, 0, buf_elems * sizeof(uint32_t));
+
+    uint32_t nodes_populated = 0;
+
+    if (_nnodes_per_sector > 0)
+    {
+        // Multi-node-per-sector layout.
+        const uint64_t total_graph_sectors = DIV_ROUND_UP(_num_points, _nnodes_per_sector);
+        for (uint64_t sec = 0; sec < total_graph_sectors; ++sec)
+        {
+            // Sector numbering: graph sector 0 is at disk offset SECTOR_LEN
+            // (sector 0 = header).
+            AlignedRead req;
+            req.offset = (1 + sec) * defaults::SECTOR_LEN;
+            req.len    = defaults::SECTOR_LEN;
+            req.buf    = sector_buf;
+
+            std::vector<AlignedRead> reqs = {req};
+            reader->read(reqs, ctx);
+
+            const uint64_t nodes_in_sec = std::min(static_cast<uint64_t>(_nnodes_per_sector),
+                                                    _num_points - sec * _nnodes_per_sector);
+            for (uint64_t local = 0; local < nodes_in_sec; ++local)
+            {
+                const uint32_t node_id = static_cast<uint32_t>(sec * _nnodes_per_sector + local);
+                char *node_buf         = offset_to_node(sector_buf, node_id);
+                uint32_t *nhood_ptr    = offset_to_node_nhood(node_buf);
+                const uint32_t nnbrs   = *nhood_ptr;
+                const uint32_t *nbrs   = nhood_ptr + 1;
+
+                // Copy into full_nhood_buf.
+                uint32_t *dst = full_nhood_buf + static_cast<size_t>(node_id) * (_max_degree + 1);
+                *dst          = nnbrs;
+                const uint32_t copy_n = (nnbrs <= _max_degree) ? nnbrs : static_cast<uint32_t>(_max_degree);
+                memcpy(dst + 1, nbrs, copy_n * sizeof(uint32_t));
+
+                // Insert into _nhood_cache (points to the slot we just wrote).
+                _nhood_cache[node_id] = std::make_pair(copy_n, dst + 1);
+
+                // Also record in NeighborCache for future lookup().
+                _neighbor_cache.insert(node_id, dst + 1, copy_n);
+                ++nodes_populated;
+            }
+        }
+    }
+    else
+    {
+        // Multi-sector-per-node layout.
+        for (uint64_t node_id = 0; node_id < _num_points; ++node_id)
+        {
+            AlignedRead req;
+            req.offset = get_node_sector(node_id) * defaults::SECTOR_LEN;
+            req.len    = num_sectors_per_node * defaults::SECTOR_LEN;
+            req.buf    = sector_buf;
+
+            std::vector<AlignedRead> reqs = {req};
+            reader->read(reqs, ctx);
+
+            char *node_buf      = offset_to_node(sector_buf, node_id);
+            uint32_t *nhood_ptr = offset_to_node_nhood(node_buf);
+            const uint32_t nnbrs = *nhood_ptr;
+            const uint32_t *nbrs = nhood_ptr + 1;
+
+            uint32_t *dst = full_nhood_buf + static_cast<size_t>(node_id) * (_max_degree + 1);
+            *dst          = nnbrs;
+            const uint32_t copy_n = (nnbrs <= _max_degree) ? nnbrs : static_cast<uint32_t>(_max_degree);
+            memcpy(dst + 1, nbrs, copy_n * sizeof(uint32_t));
+
+            _nhood_cache[node_id] = std::make_pair(copy_n, dst + 1);
+            _neighbor_cache.insert(node_id, dst + 1, copy_n);
+            ++nodes_populated;
+        }
+    }
+
+    // Hand ownership of the buffer to the appropriate member so that the
+    // destructor will free it.
+    // Case 1: load_cache_list() was never called  → _nhood_cache_buf is null;
+    //         we own it via _nhood_cache_buf (destructor already deletes it).
+    // Case 2: load_cache_list() was called first   → _nhood_cache_buf is taken;
+    //         store in _full_nhood_preload_buf (destructor deletes it too).
+    //         The old BFS-cache entries in _nhood_cache have been overwritten
+    //         for every node_id, so _nhood_cache_buf's memory is now unused but
+    //         not leaked (it is still freed by the destructor).
+    if (_nhood_cache_buf == nullptr)
+    {
+        _nhood_cache_buf = full_nhood_buf;
+    }
+    else
+    {
+        _full_nhood_preload_buf = full_nhood_buf;
+    }
+
+    aligned_free(sector_buf);
+
+    const size_t mb = _neighbor_cache.size_bytes() / (1024 * 1024);
+    diskann::cout << " done. Populated " << nodes_populated << " nodes."
+                  << " Approx DRAM used: " << mb << " MB." << std::endl;
+}
+
 #ifdef USE_BING_INFRA
 bool getNextCompletedRequest(std::shared_ptr<AlignedFileReader> &reader, IOContext &ctx, size_t size,
                              int &completedIndex)
@@ -1566,19 +1724,33 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         for (auto &cached_nhood : cached_nhoods)
         {
             auto global_cache_iter = _coord_cache.find(cached_nhood.first);
-            T *node_fp_coords_copy = global_cache_iter->second;
             float cur_expanded_dist;
-            if (!_use_disk_index_pq)
+            if (global_cache_iter != _coord_cache.end())
             {
-                cur_expanded_dist = _dist_cmp->compare(aligned_query_T, node_fp_coords_copy, (uint32_t)_aligned_dim);
+                // Hot path: full-precision coords available in _coord_cache
+                T *node_fp_coords_copy = global_cache_iter->second;
+                if (!_use_disk_index_pq)
+                {
+                    cur_expanded_dist =
+                        _dist_cmp->compare(aligned_query_T, node_fp_coords_copy, (uint32_t)_aligned_dim);
+                }
+                else
+                {
+                    if (metric == diskann::Metric::INNER_PRODUCT)
+                        cur_expanded_dist =
+                            _disk_pq_table.inner_product(query_float, (uint8_t *)node_fp_coords_copy);
+                    else
+                        cur_expanded_dist = _disk_pq_table.l2_distance( // disk_pq does not support OPQ yet
+                            query_float, (uint8_t *)node_fp_coords_copy);
+                }
             }
             else
             {
-                if (metric == diskann::Metric::INNER_PRODUCT)
-                    cur_expanded_dist = _disk_pq_table.inner_product(query_float, (uint8_t *)node_fp_coords_copy);
-                else
-                    cur_expanded_dist = _disk_pq_table.l2_distance( // disk_pq does not support OPQ yet
-                        query_float, (uint8_t *)node_fp_coords_copy);
+                // Fallback: node is in _nhood_cache (via enable_neighbor_cache) but not in _coord_cache.
+                // Use in-RAM PQ compressed vectors to compute an approximate distance.
+                uint32_t node_id = (uint32_t)cached_nhood.first;
+                compute_dists(&node_id, 1, dist_scratch);
+                cur_expanded_dist = dist_scratch[0];
             }
             full_retset.push_back(Neighbor((uint32_t)cached_nhood.first, cur_expanded_dist));
             if (exact_divergence_k > 0.0f && cur_expanded_dist < hop_best_exact_dist)

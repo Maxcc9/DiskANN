@@ -126,7 +126,7 @@ template <typename T> class SearchServer
   public:
     SearchServer(const std::string &index_prefix, const diskann::Metric metric, const uint32_t num_nodes_to_cache,
                  const uint32_t num_threads, const uint32_t beamwidth, const float frontier_divergence_k,
-                 const float exact_divergence_k)
+                 const float exact_divergence_k, const bool enable_neighbor_cache)
         : _beamwidth(beamwidth), _frontier_divergence_k(frontier_divergence_k),
           _exact_divergence_k(exact_divergence_k)
     {
@@ -147,6 +147,16 @@ template <typename T> class SearchServer
         std::cout << "Caching " << num_nodes_to_cache << " BFS nodes around medoid(s)" << std::endl;
         _index->cache_bfs_levels(num_nodes_to_cache, node_list);
         _index->load_cache_list(node_list);
+
+        if (enable_neighbor_cache)
+        {
+            _index->enable_neighbor_cache();
+        }
+        else
+        {
+            std::cout << "[NeighborCache] Disabled (pass --enable_neighbor_cache to enable full preload)" << std::endl;
+        }
+
         _dimensions = _index->get_data_dim();
         // For MIPS the index internally uses dim+1 (augmented norm dim).
         // Clients send only the original dim, so we read dim-1 and zero-pad.
@@ -374,10 +384,11 @@ template <typename T> class SearchServer
 template <typename T>
 int run_search_server(const std::string &index_path_prefix, const diskann::Metric metric,
                       const uint32_t num_nodes_to_cache, const uint32_t num_threads, const uint32_t beamwidth,
-                      const float frontier_divergence_k, const float exact_divergence_k, const uint16_t port)
+                      const float frontier_divergence_k, const float exact_divergence_k, const uint16_t port,
+                      const bool enable_neighbor_cache)
 {
     SearchServer<T> server(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                            frontier_divergence_k, exact_divergence_k);
+                            frontier_divergence_k, exact_divergence_k, enable_neighbor_cache);
     server.serve(port, num_threads);
     return 0;
 }
@@ -395,6 +406,7 @@ int main(int argc, char **argv)
     uint32_t beamwidth = 4;
     float frontier_divergence_k = 0.4f;
     float exact_divergence_k = 0.0f;
+    bool enable_neighbor_cache = false;
 
     po::options_description desc{"Arguments"};
     try
@@ -419,6 +431,9 @@ int main(int argc, char **argv)
         desc.add_options()("exact_divergence_k",
                            po::value<float>(&exact_divergence_k)->default_value(0.0f),
                            "Exact Divergence Rate coefficient (uses actual expanded distances; 0=disabled, 0.4=recommended)");
+        desc.add_options()("enable_neighbor_cache",
+                           po::bool_switch(&enable_neighbor_cache)->default_value(false),
+                           "Preload ALL neighbor IDs into DRAM at startup; eliminates graph I/Os during beam search traversal");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -455,17 +470,17 @@ int main(int argc, char **argv)
         if (data_type == "float")
         {
             return run_search_server<float>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                            frontier_divergence_k, exact_divergence_k, port);
+                                            frontier_divergence_k, exact_divergence_k, port, enable_neighbor_cache);
         }
         if (data_type == "int8")
         {
             return run_search_server<int8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                             frontier_divergence_k, exact_divergence_k, port);
+                                             frontier_divergence_k, exact_divergence_k, port, enable_neighbor_cache);
         }
         if (data_type == "uint8")
         {
             return run_search_server<uint8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                               frontier_divergence_k, exact_divergence_k, port);
+                                               frontier_divergence_k, exact_divergence_k, port, enable_neighbor_cache);
         }
 
         std::cerr << "Unsupported data type " << data_type << std::endl;

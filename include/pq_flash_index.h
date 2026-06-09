@@ -8,6 +8,7 @@
 #include "aligned_file_reader.h"
 #include "concurrent_queue.h"
 #include "neighbor.h"
+#include "neighbor_cache.h"
 #include "parameters.h"
 #include "percentile_stats.h"
 #include "pq.h"
@@ -137,6 +138,11 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
     DISKANN_DLLEXPORT std::vector<std::uint8_t> get_pq_vector(std::uint64_t vid);
     DISKANN_DLLEXPORT uint64_t get_num_points();
 
+    // Enable Phase-1 Neighbor-ID Cache: preloads ALL node adjacency lists into
+    // DRAM so that beam-search traversal issues zero disk I/Os.
+    // Must be called after load() / load_from_separate_paths().
+    DISKANN_DLLEXPORT void enable_neighbor_cache();
+
   protected:
     DISKANN_DLLEXPORT void use_medoids_data_as_centroids();
     DISKANN_DLLEXPORT void setup_thread_data(uint64_t nthreads, uint64_t visited_reserve = 4096);
@@ -249,6 +255,12 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
     bool _count_visited_nodes = false;
     bool _reorder_data_exists = false;
     uint64_t _reoreder_data_offset = 0;
+
+    // Phase-1 neighbor-ID cache (full preload into DRAM)
+    NeighborCache _neighbor_cache;
+    // Backing buffer owned by enable_neighbor_cache() when _nhood_cache_buf is
+    // already in use by load_cache_list().  Freed in destructor.
+    uint32_t *_full_nhood_preload_buf = nullptr;
 
     // filter support
     uint32_t *_pts_to_label_offsets = nullptr;
