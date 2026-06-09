@@ -1997,6 +1997,60 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         std::sort(full_retset.begin(), full_retset.end());
     }
 
+    // Phase-3: re-rank top candidates with exact disk reads to fix PQ-approximation
+    // distance error in full_retset caused by cache hits bypassing disk I/O.
+    if (_bounded_cache.enabled())
+    {
+        // Re-rank all candidates visited during traversal (full_retset.size() ≤ l_search).
+        // Since l_search ≤ MAX_N_SECTOR_READS=128 for our use cases, the sector_scratch
+        // buffer is guaranteed to hold all candidates. Any remainder with stale PQ distances
+        // is erased after the exact re-read so sorting gives correct order.
+        const size_t rerank_n = std::min(full_retset.size(), defaults::MAX_N_SECTOR_READS);
+        if (full_retset.size() > rerank_n)
+            full_retset.erase(full_retset.begin() + rerank_n, full_retset.end());
+
+        std::vector<AlignedRead> rerank_reqs;
+        rerank_reqs.reserve(rerank_n);
+        for (size_t i = 0; i < rerank_n; ++i)
+        {
+            rerank_reqs.emplace_back(
+                get_node_sector((size_t)full_retset[i].id) * defaults::SECTOR_LEN,
+                num_sectors_per_node * defaults::SECTOR_LEN,
+                sector_scratch + i * num_sectors_per_node * defaults::SECTOR_LEN);
+            if (stats != nullptr)
+            {
+                stats->n_4k++;
+                stats->n_ios++;
+            }
+        }
+        io_timer.reset();
+        reader->read(rerank_reqs, ctx);
+        if (stats != nullptr)
+            stats->io_us += (float)io_timer.elapsed();
+
+        for (size_t i = 0; i < rerank_n; ++i)
+        {
+            char *node_disk_buf = offset_to_node(
+                sector_scratch + i * (size_t)num_sectors_per_node * defaults::SECTOR_LEN,
+                full_retset[i].id);
+            T *node_coords = offset_to_node_coords(node_disk_buf);
+            memcpy(data_buf, node_coords, _disk_bytes_per_point);
+            if (!_use_disk_index_pq)
+            {
+                full_retset[i].distance =
+                    _dist_cmp->compare(aligned_query_T, data_buf, (uint32_t)_aligned_dim);
+            }
+            else
+            {
+                full_retset[i].distance =
+                    (metric == diskann::Metric::INNER_PRODUCT)
+                        ? _disk_pq_table.inner_product(query_float, (uint8_t *)data_buf)
+                        : _disk_pq_table.l2_distance(query_float, (uint8_t *)data_buf);
+            }
+        }
+        std::sort(full_retset.begin(), full_retset.end());
+    }
+
     // copy k_search values
     for (uint64_t i = 0; i < k_search; i++)
     {
