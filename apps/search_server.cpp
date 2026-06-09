@@ -126,7 +126,8 @@ template <typename T> class SearchServer
   public:
     SearchServer(const std::string &index_prefix, const diskann::Metric metric, const uint32_t num_nodes_to_cache,
                  const uint32_t num_threads, const uint32_t beamwidth, const float frontier_divergence_k,
-                 const float exact_divergence_k, const bool enable_neighbor_cache)
+                 const float exact_divergence_k, const bool enable_neighbor_cache,
+                 const double neighbor_cache_gb)
         : _beamwidth(beamwidth), _frontier_divergence_k(frontier_divergence_k),
           _exact_divergence_k(exact_divergence_k)
     {
@@ -148,13 +149,21 @@ template <typename T> class SearchServer
         _index->cache_bfs_levels(num_nodes_to_cache, node_list);
         _index->load_cache_list(node_list);
 
-        if (enable_neighbor_cache)
+        if (neighbor_cache_gb > 0.0)
         {
+            // Phase-3: bounded on-demand CLOCK cache (memory-budget controlled)
+            const size_t capacity_bytes =
+                static_cast<size_t>(neighbor_cache_gb * 1024.0 * 1024.0 * 1024.0);
+            _index->init_bounded_neighbor_cache(capacity_bytes);
+        }
+        else if (enable_neighbor_cache)
+        {
+            // Phase-1: full preload (backward compatible)
             _index->enable_neighbor_cache();
         }
         else
         {
-            std::cout << "[NeighborCache] Disabled (pass --enable_neighbor_cache to enable full preload)" << std::endl;
+            std::cout << "[BoundedCache] Disabled (pass --neighbor_cache_gb N to enable)" << std::endl;
         }
 
         _dimensions = _index->get_data_dim();
@@ -385,10 +394,11 @@ template <typename T>
 int run_search_server(const std::string &index_path_prefix, const diskann::Metric metric,
                       const uint32_t num_nodes_to_cache, const uint32_t num_threads, const uint32_t beamwidth,
                       const float frontier_divergence_k, const float exact_divergence_k, const uint16_t port,
-                      const bool enable_neighbor_cache)
+                      const bool enable_neighbor_cache, const double neighbor_cache_gb)
 {
     SearchServer<T> server(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                            frontier_divergence_k, exact_divergence_k, enable_neighbor_cache);
+                            frontier_divergence_k, exact_divergence_k, enable_neighbor_cache,
+                            neighbor_cache_gb);
     server.serve(port, num_threads);
     return 0;
 }
@@ -407,6 +417,7 @@ int main(int argc, char **argv)
     float frontier_divergence_k = 0.4f;
     float exact_divergence_k = 0.0f;
     bool enable_neighbor_cache = false;
+    double neighbor_cache_gb = 0.0;
 
     po::options_description desc{"Arguments"};
     try
@@ -433,7 +444,10 @@ int main(int argc, char **argv)
                            "Exact Divergence Rate coefficient (uses actual expanded distances; 0=disabled, 0.4=recommended)");
         desc.add_options()("enable_neighbor_cache",
                            po::bool_switch(&enable_neighbor_cache)->default_value(false),
-                           "Preload ALL neighbor IDs into DRAM at startup; eliminates graph I/Os during beam search traversal");
+                           "Preload ALL neighbor IDs into DRAM at startup (Phase-1); eliminates graph I/Os during beam search traversal");
+        desc.add_options()("neighbor_cache_gb",
+                           po::value<double>(&neighbor_cache_gb)->default_value(0.0),
+                           "Phase-3 bounded neighbor-ID cache size in GB (0=disabled); takes precedence over --enable_neighbor_cache when > 0");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -470,17 +484,20 @@ int main(int argc, char **argv)
         if (data_type == "float")
         {
             return run_search_server<float>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                            frontier_divergence_k, exact_divergence_k, port, enable_neighbor_cache);
+                                            frontier_divergence_k, exact_divergence_k, port,
+                                            enable_neighbor_cache, neighbor_cache_gb);
         }
         if (data_type == "int8")
         {
             return run_search_server<int8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                             frontier_divergence_k, exact_divergence_k, port, enable_neighbor_cache);
+                                             frontier_divergence_k, exact_divergence_k, port,
+                                             enable_neighbor_cache, neighbor_cache_gb);
         }
         if (data_type == "uint8")
         {
             return run_search_server<uint8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                               frontier_divergence_k, exact_divergence_k, port, enable_neighbor_cache);
+                                              frontier_divergence_k, exact_divergence_k, port,
+                                              enable_neighbor_cache, neighbor_cache_gb);
         }
 
         std::cerr << "Unsupported data type " << data_type << std::endl;

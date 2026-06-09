@@ -1350,6 +1350,29 @@ void PQFlashIndex<T, LabelT>::enable_neighbor_cache()
                   << " Approx DRAM used: " << mb << " MB." << std::endl;
 }
 
+// ---------------------------------------------------------------------------
+// init_bounded_neighbor_cache(): Phase-3 on-demand bounded cache setup.
+// Initialises the BoundedNeighborCache data structure with the given byte
+// budget.  Actual node data is inserted lazily during cached_beam_search().
+// ---------------------------------------------------------------------------
+template <typename T, typename LabelT>
+void PQFlashIndex<T, LabelT>::init_bounded_neighbor_cache(size_t capacity_bytes)
+{
+    if (!_load_flag)
+    {
+        diskann::cout << "[BoundedCache] Index not loaded yet; cannot initialise." << std::endl;
+        return;
+    }
+    _bounded_cache.init(capacity_bytes, static_cast<uint32_t>(_max_degree));
+    const size_t nodes = _bounded_cache.total_capacity_nodes();
+    const double pct   = (_num_points > 0)
+                         ? 100.0 * static_cast<double>(nodes) / static_cast<double>(_num_points)
+                         : 0.0;
+    diskann::cout << "[BoundedCache] capacity=" << nodes << " nodes ("
+                  << pct << "% of " << _num_points << "), "
+                  << capacity_bytes / (1024.0 * 1024.0 * 1024.0) << " GB" << std::endl;
+}
+
 #ifdef USE_BING_INFRA
 bool getNextCompletedRequest(std::shared_ptr<AlignedFileReader> &reader, IOContext &ctx, size_t size,
                              int &completedIndex)
@@ -1675,6 +1698,27 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     stats->n_cache_hits++;
                 }
             }
+            else if (_bounded_cache.enabled())
+            {
+                const auto *entry = _bounded_cache.lookup(nbr.id);
+                if (entry != nullptr)
+                {
+                    // Bounded cache hit: reuse the same pair<uint64_t, uint32_t*> format
+                    // as _nhood_cache so the processing loop below is unchanged.
+                    cached_nhoods.push_back(
+                        std::make_pair(nbr.id,
+                                       std::make_pair(static_cast<uint64_t>(entry->degree),
+                                                      entry->neighbors)));
+                    if (stats != nullptr)
+                    {
+                        stats->n_cache_hits++;
+                    }
+                }
+                else
+                {
+                    frontier.push_back(nbr.id);
+                }
+            }
             else
             {
                 frontier.push_back(nbr.id);
@@ -1805,6 +1849,15 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             char *node_disk_buf = offset_to_node(frontier_nhood.second, frontier_nhood.first);
             uint32_t *node_buf = offset_to_node_nhood(node_disk_buf);
             uint64_t nnbrs = (uint64_t)(*node_buf);
+            uint32_t *node_nbrs_raw = node_buf + 1;
+
+            // Phase-3: populate bounded cache with freshly read neighbor list.
+            if (_bounded_cache.enabled())
+            {
+                _bounded_cache.insert(frontier_nhood.first, node_nbrs_raw,
+                                      static_cast<uint32_t>(nnbrs));
+            }
+
             T *node_fp_coords = offset_to_node_coords(node_disk_buf);
             memcpy(data_buf, node_fp_coords, _disk_bytes_per_point);
             float cur_expanded_dist;
