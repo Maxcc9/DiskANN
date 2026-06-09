@@ -70,6 +70,7 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
                                               const float et_sat_gamma = 1.0f,
                                               const uint32_t et_sat_delta = 0,
                                               const float frontier_divergence_k = 0.0f,
+                                              const float exact_divergence_k = 0.0f,
                                               const bool use_reorder_data = false, QueryStats *stats = nullptr);
 
     DISKANN_DLLEXPORT void cached_beam_search(const T *query, const uint64_t k_search, const uint64_t l_search,
@@ -81,6 +82,7 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
                                               const float et_sat_gamma = 1.0f,
                                               const uint32_t et_sat_delta = 0,
                                               const float frontier_divergence_k = 0.0f,
+                                              const float exact_divergence_k = 0.0f,
                                               const bool use_reorder_data = false, QueryStats *stats = nullptr);
 
     DISKANN_DLLEXPORT void cached_beam_search(const T *query, const uint64_t k_search, const uint64_t l_search,
@@ -91,6 +93,7 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
                                               const float et_sat_gamma = 1.0f,
                                               const uint32_t et_sat_delta = 0,
                                               const float frontier_divergence_k = 0.0f,
+                                              const float exact_divergence_k = 0.0f,
                                               const bool use_reorder_data = false,
                                               QueryStats *stats = nullptr);
 
@@ -103,6 +106,7 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
                                               const float et_sat_gamma = 1.0f,
                                               const uint32_t et_sat_delta = 0,
                                               const float frontier_divergence_k = 0.0f,
+                                              const float exact_divergence_k = 0.0f,
                                               const bool use_reorder_data = false,
                                               QueryStats *stats = nullptr);
 

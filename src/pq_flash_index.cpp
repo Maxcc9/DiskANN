@@ -328,7 +328,7 @@ void PQFlashIndex<T, LabelT>::generate_cache_list_from_sample_queries(std::strin
         cached_beam_search(samples + (i * sample_aligned_dim), 1, l_search, tmp_result_ids_64.data() + i,
                            tmp_result_dists.data() + i, beamwidth, filtered_search, label_for_search,
                            std::numeric_limits<float>::max(), 0.0f, std::numeric_limits<uint32_t>::max(), 1.0f, 0,
-                           0.0f, false);
+                           0.0f, 0.0f, false);
     }
 
     std::sort(this->_node_visit_counter.begin(), _node_visit_counter.end(),
@@ -1241,12 +1241,12 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const float et_theta, const float et_dk, const uint32_t hop_budget,
                                                  const float et_sat_gamma, const uint32_t et_sat_delta,
-                                                 const float frontier_divergence_k, const bool use_reorder_data,
-                                                 QueryStats *stats)
+                                                 const float frontier_divergence_k, const float exact_divergence_k,
+                                                 const bool use_reorder_data, QueryStats *stats)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, std::numeric_limits<uint32_t>::max(),
                        et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, frontier_divergence_k,
-                       use_reorder_data, stats);
+                       exact_divergence_k, use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
@@ -1255,12 +1255,12 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  const bool use_filter, const LabelT &filter_label,
                                                  const float et_theta, const float et_dk, const uint32_t hop_budget,
                                                  const float et_sat_gamma, const uint32_t et_sat_delta,
-                                                 const float frontier_divergence_k, const bool use_reorder_data,
-                                                 QueryStats *stats)
+                                                 const float frontier_divergence_k, const float exact_divergence_k,
+                                                 const bool use_reorder_data, QueryStats *stats)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, use_filter, filter_label,
                        std::numeric_limits<uint32_t>::max(), et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta,
-                       frontier_divergence_k, use_reorder_data, stats);
+                       frontier_divergence_k, exact_divergence_k, use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
@@ -1269,12 +1269,13 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  const uint32_t io_limit, const float et_theta, const float et_dk,
                                                  const uint32_t hop_budget, const float et_sat_gamma,
                                                  const uint32_t et_sat_delta, const float frontier_divergence_k,
-                                                 const bool use_reorder_data, QueryStats *stats)
+                                                 const float exact_divergence_k, const bool use_reorder_data,
+                                                 QueryStats *stats)
 {
     LabelT dummy_filter = 0;
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, false, dummy_filter, io_limit,
                        et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, frontier_divergence_k,
-                       use_reorder_data, stats);
+                       exact_divergence_k, use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
@@ -1284,7 +1285,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  const uint32_t io_limit, const float et_theta, const float et_dk,
                                                  const uint32_t hop_budget, const float et_sat_gamma,
                                                  const uint32_t et_sat_delta, const float frontier_divergence_k,
-                                                 const bool use_reorder_data, QueryStats *stats)
+                                                 const float exact_divergence_k, const bool use_reorder_data,
+                                                 QueryStats *stats)
 {
 
     uint64_t num_sector_per_nodes = DIV_ROUND_UP(_max_node_len, defaults::SECTOR_LEN);
@@ -1423,6 +1425,13 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     float _pqdr_prev_ratio = 0.0f;
     float _pqdr_ema = 0.0f;
 
+    // Exact Divergence Rate (EDR): backward-looking DR using actual expanded distances.
+    // hop_best_exact_dist = min exact dist of nodes expanded in the previous hop.
+    // exact_ratio = hop_best_exact_dist / kth_pq; rising ratio → reduce effective_theta.
+    float _edr_ratio_prev = 0.0f;
+    float _edr_ema = 0.0f;
+    float hop_best_exact_dist = std::numeric_limits<float>::max();
+
     // Top-k saturation state: track prev top-k IDs to detect convergence
     std::vector<uint32_t> sat_prev_ids(k_search, std::numeric_limits<uint32_t>::max());
     uint32_t sat_count = 0;
@@ -1461,6 +1470,22 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     }
                     _pqdr_prev_ratio = cur_ratio;
                 }
+                // EDR: further lower effective_theta using exact distances from previous hop.
+                // hop_best_exact_dist = min exact dist expanded last hop; rising ratio signals
+                // the search is moving away from true neighbors → fire ET sooner.
+                if (exact_divergence_k > 0.0f &&
+                    hop_best_exact_dist < std::numeric_limits<float>::max())
+                {
+                    const float cur_exact_ratio = hop_best_exact_dist / kth_pq;
+                    if (_edr_ratio_prev > 0.0f)
+                    {
+                        const float delta_exact = cur_exact_ratio - _edr_ratio_prev;
+                        _edr_ema = 0.5f * delta_exact + 0.5f * _edr_ema;
+                        if (_edr_ema > 0.0f)
+                            effective_theta = std::max(1.0f, effective_theta - exact_divergence_k * _edr_ema);
+                    }
+                    _edr_ratio_prev = cur_exact_ratio;
+                }
                 if (best_unexp_pq > kth_pq * effective_theta)
                     break;
             }
@@ -1476,6 +1501,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         frontier_read_reqs.clear();
         cached_nhoods.clear();
         sector_scratch_idx = 0;
+        hop_best_exact_dist = std::numeric_limits<float>::max();
         // find new beam
         uint32_t num_seen = 0;
         while (retset.has_unexpanded_node() && frontier.size() < beam_width && num_seen < beam_width)
@@ -1555,6 +1581,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                         query_float, (uint8_t *)node_fp_coords_copy);
             }
             full_retset.push_back(Neighbor((uint32_t)cached_nhood.first, cur_expanded_dist));
+            if (exact_divergence_k > 0.0f && cur_expanded_dist < hop_best_exact_dist)
+                hop_best_exact_dist = cur_expanded_dist;
 
             uint64_t nnbrs = cached_nhood.second.first;
             uint32_t *node_nbrs = cached_nhood.second.second;
@@ -1620,6 +1648,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     cur_expanded_dist = _disk_pq_table.l2_distance(query_float, (uint8_t *)data_buf);
             }
             full_retset.push_back(Neighbor(frontier_nhood.first, cur_expanded_dist));
+            if (exact_divergence_k > 0.0f && cur_expanded_dist < hop_best_exact_dist)
+                hop_best_exact_dist = cur_expanded_dist;
             uint32_t *node_nbrs = (node_buf + 1);
             // compute node_nbrs <-> query dist in PQ space
             cpu_timer.reset();
@@ -1801,7 +1831,7 @@ uint32_t PQFlashIndex<T, LabelT>::range_search(const T *query1, const double ran
             x = std::numeric_limits<float>::max();
         this->cached_beam_search(query1, l_search, l_search, indices.data(), distances.data(), cur_bw,
                                  std::numeric_limits<float>::max(), 0.0f, std::numeric_limits<uint32_t>::max(),
-                                 1.0f, 0, false, stats);
+                                 1.0f, 0, 0.0f, 0.0f, false, stats);
         for (uint32_t i = 0; i < l_search; i++)
         {
             if (distances[i] > (float)range)

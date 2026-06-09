@@ -125,8 +125,10 @@ template <typename T> class SearchServer
 {
   public:
     SearchServer(const std::string &index_prefix, const diskann::Metric metric, const uint32_t num_nodes_to_cache,
-                 const uint32_t num_threads, const uint32_t beamwidth, const float frontier_divergence_k)
-        : _beamwidth(beamwidth), _frontier_divergence_k(frontier_divergence_k)
+                 const uint32_t num_threads, const uint32_t beamwidth, const float frontier_divergence_k,
+                 const float exact_divergence_k)
+        : _beamwidth(beamwidth), _frontier_divergence_k(frontier_divergence_k),
+          _exact_divergence_k(exact_divergence_k)
     {
 #ifdef _WINDOWS
         static_assert(false, "search_server is currently implemented for POSIX platforms only.");
@@ -146,6 +148,11 @@ template <typename T> class SearchServer
         _index->cache_bfs_levels(num_nodes_to_cache, node_list);
         _index->load_cache_list(node_list);
         _dimensions = _index->get_data_dim();
+        // For MIPS the index internally uses dim+1 (augmented norm dim).
+        // Clients send only the original dim, so we read dim-1 and zero-pad.
+        _client_dimensions = (metric == diskann::Metric::INNER_PRODUCT && _dimensions > 0)
+                                 ? _dimensions - 1
+                                 : _dimensions;
         omp_set_num_threads(num_threads);
     }
 
@@ -299,12 +306,13 @@ template <typename T> class SearchServer
             throw std::runtime_error("request K must be <= L");
         }
 
-        std::vector<float> query_f(_dimensions);
-        const size_t query_bytes = static_cast<size_t>(_dimensions) * sizeof(float);
+        std::vector<float> query_f(_dimensions, 0.0f);
+        const size_t query_bytes = static_cast<size_t>(_client_dimensions) * sizeof(float);
         if (!recv_all(client_fd, query_f.data(), query_bytes))
         {
             throw std::runtime_error("failed to read query vector");
         }
+        // query_f[_dimensions-1] stays 0.0 for MIPS (norm augmentation); matches pq_flash_index logic.
 
         std::vector<T> query(_dimensions);
         for (uint64_t i = 0; i < _dimensions; ++i)
@@ -319,7 +327,8 @@ template <typename T> class SearchServer
         {
             _index->cached_beam_search(query.data(), request.k, request.l, result_ids.data(), result_dists.data(),
                                        _beamwidth, request.et_theta, 0.0f,
-                                       std::numeric_limits<uint32_t>::max(), 1.0f, 0, _frontier_divergence_k);
+                                       std::numeric_limits<uint32_t>::max(), 1.0f, 0,
+                                       _frontier_divergence_k, _exact_divergence_k);
         }
         else
         {
@@ -351,8 +360,10 @@ template <typename T> class SearchServer
     std::shared_ptr<AlignedFileReader> _reader;
     std::unique_ptr<diskann::PQFlashIndex<T>> _index;
     uint64_t _dimensions = 0;
+    uint64_t _client_dimensions = 0;  // == _dimensions except for MIPS where it's _dimensions-1
     uint32_t _beamwidth = 4;
     float _frontier_divergence_k = 0.4f;
+    float _exact_divergence_k = 0.0f;
 
     std::queue<int> _fd_queue;
     std::mutex _queue_mutex;
@@ -363,10 +374,10 @@ template <typename T> class SearchServer
 template <typename T>
 int run_search_server(const std::string &index_path_prefix, const diskann::Metric metric,
                       const uint32_t num_nodes_to_cache, const uint32_t num_threads, const uint32_t beamwidth,
-                      const float frontier_divergence_k, const uint16_t port)
+                      const float frontier_divergence_k, const float exact_divergence_k, const uint16_t port)
 {
     SearchServer<T> server(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                            frontier_divergence_k);
+                            frontier_divergence_k, exact_divergence_k);
     server.serve(port, num_threads);
     return 0;
 }
@@ -383,6 +394,7 @@ int main(int argc, char **argv)
     uint32_t num_nodes_to_cache = 0;
     uint32_t beamwidth = 4;
     float frontier_divergence_k = 0.4f;
+    float exact_divergence_k = 0.0f;
 
     po::options_description desc{"Arguments"};
     try
@@ -404,6 +416,9 @@ int main(int argc, char **argv)
         desc.add_options()("frontier_divergence_k",
                            po::value<float>(&frontier_divergence_k)->default_value(0.4f),
                            "PQ Divergence Rate coefficient for adaptive ET (0=disabled, 0.4=recommended)");
+        desc.add_options()("exact_divergence_k",
+                           po::value<float>(&exact_divergence_k)->default_value(0.0f),
+                           "Exact Divergence Rate coefficient (uses actual expanded distances; 0=disabled, 0.4=recommended)");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -440,17 +455,17 @@ int main(int argc, char **argv)
         if (data_type == "float")
         {
             return run_search_server<float>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                            frontier_divergence_k, port);
+                                            frontier_divergence_k, exact_divergence_k, port);
         }
         if (data_type == "int8")
         {
             return run_search_server<int8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                             frontier_divergence_k, port);
+                                             frontier_divergence_k, exact_divergence_k, port);
         }
         if (data_type == "uint8")
         {
             return run_search_server<uint8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                               frontier_divergence_k, port);
+                                               frontier_divergence_k, exact_divergence_k, port);
         }
 
         std::cerr << "Unsupported data type " << data_type << std::endl;
