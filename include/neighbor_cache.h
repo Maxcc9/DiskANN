@@ -173,12 +173,25 @@ class BoundedNeighborCache
                 shard.entries[s].neighbors =
                     shard.data.get() + static_cast<size_t>(s) * max_degree_;
             }
-            shard.clock_hand.store(0, std::memory_order_relaxed);
+            shard.clock_hand = 0;
+            // Pre-size the hash index to avoid any rehash during insert().
+            shard.index.reserve(capacity_per_shard_);
         }
     }
 
     // Return true if the cache was initialised with a non-zero capacity.
     bool enabled() const { return capacity_per_shard_ > 0; }
+
+    // Check presence without setting ref_bit (used for I/O-aware ET check).
+    bool contains(uint32_t node_id) const
+    {
+        if (capacity_per_shard_ == 0)
+            return false;
+        const uint32_t shard_idx = node_id % NUM_SHARDS;
+        const Shard    &shard    = shards_[shard_idx];
+        std::shared_lock<std::shared_mutex> lock(shard.mu);
+        return shard.index.find(node_id) != shard.index.end();
+    }
 
     // Total cache slots across all shards.
     size_t total_capacity_nodes() const
@@ -263,18 +276,16 @@ class BoundedNeighborCache
         mutable std::shared_mutex                mu;
         uint32_t                                 size{0};
         uint32_t                                 capacity{0};
-        std::atomic<uint32_t>                    clock_hand{0};
+        uint32_t                                 clock_hand{0}; // only touched under unique_lock
     };
 
     // Find a victim slot using the CLOCK algorithm.
-    // Must be called with shard.mu held exclusively.
+    // Must be called with shard.mu held exclusively (clock_hand is not atomic).
     static uint32_t find_victim(Shard &shard)
     {
         while (true)
         {
-            const uint32_t hand =
-                shard.clock_hand.fetch_add(1, std::memory_order_relaxed)
-                % shard.capacity;
+            const uint32_t hand = shard.clock_hand++ % shard.capacity;
             // exchange(false): if was true → give second chance, keep scanning;
             //                  if was false → evict this slot.
             const bool was_ref =

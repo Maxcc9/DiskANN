@@ -115,6 +115,11 @@ class NeighborPriorityQueue
         return (_cur < _size) ? _data[_cur].distance : std::numeric_limits<float>::max();
     }
 
+    uint32_t peek_unexpanded_id() const
+    {
+        return (_cur < _size) ? _data[_cur].id : std::numeric_limits<uint32_t>::max();
+    }
+
     float best_dist() const
     {
         return (_size > 0) ? _data[0].distance : std::numeric_limits<float>::max();

@@ -331,8 +331,7 @@ void PQFlashIndex<T, LabelT>::generate_cache_list_from_sample_queries(std::strin
         // "use_reorder_data" option which enables a final reranking if the disk index itself contains only PQ data.
         cached_beam_search(samples + (i * sample_aligned_dim), 1, l_search, tmp_result_ids_64.data() + i,
                            tmp_result_dists.data() + i, beamwidth, filtered_search, label_for_search,
-                           std::numeric_limits<float>::max(), 0.0f, std::numeric_limits<uint32_t>::max(), 1.0f, 0,
-                           0.0f, 0.0f, false);
+                           std::numeric_limits<float>::max(), std::numeric_limits<uint32_t>::max(), 1.0f, 0, false);
     }
 
     std::sort(this->_node_visit_counter.begin(), _node_visit_counter.end(),
@@ -359,8 +358,6 @@ void PQFlashIndex<T, LabelT>::cache_bfs_levels(uint64_t num_nodes_to_cache, std:
     std::random_device rng;
     std::mt19937 urng(rng());
 
-    tsl::robin_set<uint32_t> node_set;
-
     // Do not cache more than 10% of the nodes in the index
     uint64_t tenp_nodes = (uint64_t)(std::round(this->_num_points * 0.1));
     if (num_nodes_to_cache > tenp_nodes)
@@ -369,130 +366,134 @@ void PQFlashIndex<T, LabelT>::cache_bfs_levels(uint64_t num_nodes_to_cache, std:
                       << "(10 percent of total nodes:" << this->_num_points << ")" << std::endl;
         num_nodes_to_cache = tenp_nodes == 0 ? 1 : tenp_nodes;
     }
-    diskann::cout << "Caching " << num_nodes_to_cache << "..." << std::endl;
 
-    std::unique_ptr<tsl::robin_set<uint32_t>> cur_level, prev_level;
-    cur_level = std::make_unique<tsl::robin_set<uint32_t>>();
-    prev_level = std::make_unique<tsl::robin_set<uint32_t>>();
+    // Per-medoid BFS: distribute budget evenly so every shard region is represented equally.
+    // Each medoid gets budget = N / num_medoids; remainder goes to the last medoid.
+    // global_seen is shared across all BFS runs to prevent double-counting overlapping regions.
+    uint64_t n_entries = _num_medoids > 0 ? _num_medoids : 1;
+    uint64_t budget_each = num_nodes_to_cache / n_entries;
+    uint64_t budget_last = num_nodes_to_cache - budget_each * (n_entries - 1);
 
-    for (uint64_t miter = 0; miter < _num_medoids && cur_level->size() < num_nodes_to_cache; miter++)
+    diskann::cout << "Caching " << num_nodes_to_cache << " nodes across " << n_entries
+                  << " medoid(s) (budget_per_medoid=" << budget_each << ")" << std::endl;
+
+    tsl::robin_set<uint32_t> global_seen;
+    node_list.clear();
+    node_list.reserve(num_nodes_to_cache);
+
+    for (uint64_t m = 0; m < n_entries; m++)
     {
-        cur_level->insert(_medoids[miter]);
-    }
+        uint32_t entry_node = _medoids[m];
+        uint64_t budget = (m == n_entries - 1) ? budget_last : budget_each;
 
-    if ((_filter_to_medoid_ids.size() > 0) && (cur_level->size() < num_nodes_to_cache))
-    {
-        for (auto &x : _filter_to_medoid_ids)
+        if (global_seen.count(entry_node))
         {
-            for (auto &y : x.second)
-            {
-                cur_level->insert(y);
-                if (cur_level->size() == num_nodes_to_cache)
-                    break;
-            }
-            if (cur_level->size() == num_nodes_to_cache)
-                break;
-        }
-    }
-
-    uint64_t lvl = 1;
-    uint64_t prev_node_set_size = 0;
-    while ((node_set.size() + cur_level->size() < num_nodes_to_cache) && cur_level->size() != 0)
-    {
-        // swap prev_level and cur_level
-        std::swap(prev_level, cur_level);
-        // clear cur_level
-        cur_level->clear();
-
-        std::vector<uint32_t> nodes_to_expand;
-
-        for (const uint32_t &id : *prev_level)
-        {
-            if (node_set.find(id) != node_set.end())
-            {
-                continue;
-            }
-            node_set.insert(id);
-            nodes_to_expand.push_back(id);
+            diskann::cout << "Medoid " << m << " (node " << entry_node
+                          << ") already claimed, skipping." << std::endl;
+            continue;
         }
 
-        if (shuffle)
-            std::shuffle(nodes_to_expand.begin(), nodes_to_expand.end(), urng);
-        else
-            std::sort(nodes_to_expand.begin(), nodes_to_expand.end());
+        diskann::cout << "Medoid " << m << " (node " << entry_node
+                      << "), budget=" << budget << std::endl;
 
-        diskann::cout << "Level: " << lvl << std::flush;
-        bool finish_flag = false;
+        std::unique_ptr<tsl::robin_set<uint32_t>> cur_level, prev_level;
+        cur_level  = std::make_unique<tsl::robin_set<uint32_t>>();
+        prev_level = std::make_unique<tsl::robin_set<uint32_t>>();
+        cur_level->insert(entry_node);
 
-        uint64_t BLOCK_SIZE = 1024;
-        uint64_t nblocks = DIV_ROUND_UP(nodes_to_expand.size(), BLOCK_SIZE);
-        for (size_t block = 0; block < nblocks && !finish_flag; block++)
+        tsl::robin_set<uint32_t> local_set;
+        uint64_t lvl = 1;
+        uint64_t prev_local_size = 0;
+
+        while ((local_set.size() + cur_level->size() < budget) && !cur_level->empty())
         {
-            diskann::cout << "." << std::flush;
-            size_t start = block * BLOCK_SIZE;
-            size_t end = (std::min)((block + 1) * BLOCK_SIZE, nodes_to_expand.size());
+            std::swap(prev_level, cur_level);
+            cur_level->clear();
 
-            std::vector<uint32_t> nodes_to_read;
-            std::vector<T *> coord_buffers(end - start, nullptr);
-            std::vector<std::pair<uint32_t, uint32_t *>> nbr_buffers;
-
-            for (size_t cur_pt = start; cur_pt < end; cur_pt++)
+            std::vector<uint32_t> nodes_to_expand;
+            for (const uint32_t &id : *prev_level)
             {
-                nodes_to_read.push_back(nodes_to_expand[cur_pt]);
-                nbr_buffers.emplace_back(0, new uint32_t[_max_degree + 1]);
-            }
-
-            // issue read requests
-            auto read_status = read_nodes(nodes_to_read, coord_buffers, nbr_buffers);
-
-            // process each nhood buf
-            for (uint32_t i = 0; i < read_status.size(); i++)
-            {
-                if (read_status[i] == false)
-                {
+                if (global_seen.count(id) || local_set.count(id))
                     continue;
-                }
-                else
+                local_set.insert(id);
+                nodes_to_expand.push_back(id);
+            }
+
+            if (shuffle)
+                std::shuffle(nodes_to_expand.begin(), nodes_to_expand.end(), urng);
+            else
+                std::sort(nodes_to_expand.begin(), nodes_to_expand.end());
+
+            diskann::cout << "  Level " << lvl << std::flush;
+            bool finish_flag = false;
+            uint64_t BLOCK_SIZE = 1024;
+            uint64_t nblocks = DIV_ROUND_UP(nodes_to_expand.size(), BLOCK_SIZE);
+
+            for (size_t block = 0; block < nblocks && !finish_flag; block++)
+            {
+                diskann::cout << "." << std::flush;
+                size_t blk_start = block * BLOCK_SIZE;
+                size_t blk_end   = (std::min)((block + 1) * BLOCK_SIZE, nodes_to_expand.size());
+
+                std::vector<uint32_t> nodes_to_read;
+                std::vector<T *> coord_buffers(blk_end - blk_start, nullptr);
+                std::vector<std::pair<uint32_t, uint32_t *>> nbr_buffers;
+
+                for (size_t cur_pt = blk_start; cur_pt < blk_end; cur_pt++)
                 {
+                    nodes_to_read.push_back(nodes_to_expand[cur_pt]);
+                    nbr_buffers.emplace_back(0, new uint32_t[_max_degree + 1]);
+                }
+
+                auto read_status = read_nodes(nodes_to_read, coord_buffers, nbr_buffers);
+
+                for (uint32_t i = 0; i < read_status.size(); i++)
+                {
+                    if (!read_status[i])
+                    {
+                        delete[] nbr_buffers[i].second;
+                        continue;
+                    }
                     uint32_t nnbrs = nbr_buffers[i].first;
                     uint32_t *nbrs = nbr_buffers[i].second;
-
-                    // explore next level
                     for (uint32_t j = 0; j < nnbrs && !finish_flag; j++)
                     {
-                        if (node_set.find(nbrs[j]) == node_set.end())
-                        {
+                        if (!global_seen.count(nbrs[j]) && !local_set.count(nbrs[j]))
                             cur_level->insert(nbrs[j]);
-                        }
-                        if (cur_level->size() + node_set.size() >= num_nodes_to_cache)
-                        {
+                        if (local_set.size() + cur_level->size() >= budget)
                             finish_flag = true;
-                        }
                     }
+                    delete[] nbr_buffers[i].second;
                 }
-                delete[] nbr_buffers[i].second;
             }
+
+            diskann::cout << " #nodes: " << local_set.size() - prev_local_size
+                          << ", total: " << local_set.size() << std::endl;
+            prev_local_size = local_set.size();
+            lvl++;
         }
 
-        diskann::cout << ". #nodes: " << node_set.size() - prev_node_set_size
-                      << ", #nodes thus far: " << node_set.size() << std::endl;
-        prev_node_set_size = node_set.size();
-        lvl++;
+        // Drain remaining cur_level frontier into local_set up to budget.
+        for (const uint32_t &id : *cur_level)
+        {
+            if (local_set.size() >= budget)
+                break;
+            if (!global_seen.count(id))
+                local_set.insert(id);
+        }
+
+        // Commit this medoid's nodes to the shared global state.
+        for (const uint32_t &id : local_set)
+        {
+            global_seen.insert(id);
+            node_list.push_back(id);
+        }
+
+        diskann::cout << "Medoid " << m << " done: " << local_set.size()
+                      << " nodes (running total: " << node_list.size() << ")" << std::endl;
     }
 
-    assert(node_set.size() + cur_level->size() == num_nodes_to_cache || cur_level->size() == 0);
-
-    node_list.clear();
-    node_list.reserve(node_set.size() + cur_level->size());
-    for (auto node : node_set)
-        node_list.push_back(node);
-    for (auto node : *cur_level)
-        node_list.push_back(node);
-
-    diskann::cout << "Level: " << lvl << std::flush;
-    diskann::cout << ". #nodes: " << node_list.size() - prev_node_set_size << ", #nodes thus far: " << node_list.size()
-                  << std::endl;
-    diskann::cout << "done" << std::endl;
+    diskann::cout << "cache_bfs_levels done. Total cached: " << node_list.size() << std::endl;
 }
 
 template <typename T, typename LabelT> void PQFlashIndex<T, LabelT>::use_medoids_data_as_centroids()
@@ -1420,53 +1421,47 @@ bool getNextCompletedRequest(std::shared_ptr<AlignedFileReader> &reader, IOConte
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
-                                                 const float et_theta, const float et_dk, const uint32_t hop_budget,
+                                                 const float et_theta, const uint32_t hop_budget,
                                                  const float et_sat_gamma, const uint32_t et_sat_delta,
-                                                 const float frontier_divergence_k, const float exact_divergence_k,
                                                  const bool use_reorder_data, QueryStats *stats)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, std::numeric_limits<uint32_t>::max(),
-                       et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, frontier_divergence_k,
-                       exact_divergence_k, use_reorder_data, stats);
+                       et_theta, hop_budget, et_sat_gamma, et_sat_delta, use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const bool use_filter, const LabelT &filter_label,
-                                                 const float et_theta, const float et_dk, const uint32_t hop_budget,
+                                                 const float et_theta, const uint32_t hop_budget,
                                                  const float et_sat_gamma, const uint32_t et_sat_delta,
-                                                 const float frontier_divergence_k, const float exact_divergence_k,
                                                  const bool use_reorder_data, QueryStats *stats)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, use_filter, filter_label,
-                       std::numeric_limits<uint32_t>::max(), et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta,
-                       frontier_divergence_k, exact_divergence_k, use_reorder_data, stats);
+                       std::numeric_limits<uint32_t>::max(), et_theta, hop_budget, et_sat_gamma, et_sat_delta,
+                       use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
-                                                 const uint32_t io_limit, const float et_theta, const float et_dk,
+                                                 const uint32_t io_limit, const float et_theta,
                                                  const uint32_t hop_budget, const float et_sat_gamma,
-                                                 const uint32_t et_sat_delta, const float frontier_divergence_k,
-                                                 const float exact_divergence_k, const bool use_reorder_data,
+                                                 const uint32_t et_sat_delta, const bool use_reorder_data,
                                                  QueryStats *stats)
 {
     LabelT dummy_filter = 0;
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, false, dummy_filter, io_limit,
-                       et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, frontier_divergence_k,
-                       exact_divergence_k, use_reorder_data, stats);
+                       et_theta, hop_budget, et_sat_gamma, et_sat_delta, use_reorder_data, stats);
 }
 
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const bool use_filter, const LabelT &filter_label,
-                                                 const uint32_t io_limit, const float et_theta, const float et_dk,
+                                                 const uint32_t io_limit, const float et_theta,
                                                  const uint32_t hop_budget, const float et_sat_gamma,
-                                                 const uint32_t et_sat_delta, const float frontier_divergence_k,
-                                                 const float exact_divergence_k, const bool use_reorder_data,
+                                                 const uint32_t et_sat_delta, const bool use_reorder_data,
                                                  QueryStats *stats)
 {
 
@@ -1602,17 +1597,6 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     uint32_t hops = 0;
     uint32_t num_ios = 0;
 
-    // Method 3 + PQ-DR adaptive stop state.
-    float _pqdr_prev_ratio = 0.0f;
-    float _pqdr_ema = 0.0f;
-
-    // Exact Divergence Rate (EDR): backward-looking DR using actual expanded distances.
-    // hop_best_exact_dist = min exact dist of nodes expanded in the previous hop.
-    // exact_ratio = hop_best_exact_dist / kth_pq; rising ratio → reduce effective_theta.
-    float _edr_ratio_prev = 0.0f;
-    float _edr_ema = 0.0f;
-    float hop_best_exact_dist = std::numeric_limits<float>::max();
-
     // Top-k saturation state: track prev top-k IDs to detect convergence
     std::vector<uint32_t> sat_prev_ids(k_search, std::numeric_limits<uint32_t>::max());
     uint32_t sat_count = 0;
@@ -1629,47 +1613,15 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 
     while (retset.has_unexpanded_node() && num_ios < io_limit)
     {
-        // Method 3 + PQ-DR: stop when best-unexpanded PQ dist > kth_PQ * effective_theta.
-        // PQ Divergence Rate adapts effective_theta downward when the ratio is rising fast
-        // (frontier diverging -> oracle is near -> stop sooner). Zero extra I/O.
+        // θ-ET: stop when the closest unexpanded candidate is θ× farther than the current k-th best.
+        // Query-adaptive: tight-cluster queries converge fast and fire ET early;
+        // hard queries keep kth_pq high longer, granting more hops automatically.
         if (et_theta < std::numeric_limits<float>::max() && retset.size() >= k_search)
         {
             const float best_unexp_pq = retset.peek_unexpanded_dist();
             const float kth_pq = retset[k_search - 1].distance;
-            if (kth_pq > 1e-9f)
-            {
-                float effective_theta = et_theta;
-                if (frontier_divergence_k > 0.0f)
-                {
-                    const float cur_ratio = best_unexp_pq / kth_pq;
-                    if (_pqdr_prev_ratio > 0.0f)
-                    {
-                        const float delta = cur_ratio - _pqdr_prev_ratio;
-                        _pqdr_ema = 0.5f * delta + 0.5f * _pqdr_ema;
-                        if (_pqdr_ema > 0.0f)
-                            effective_theta = std::max(1.0f, et_theta - frontier_divergence_k * _pqdr_ema);
-                    }
-                    _pqdr_prev_ratio = cur_ratio;
-                }
-                // EDR: further lower effective_theta using exact distances from previous hop.
-                // hop_best_exact_dist = min exact dist expanded last hop; rising ratio signals
-                // the search is moving away from true neighbors → fire ET sooner.
-                if (exact_divergence_k > 0.0f &&
-                    hop_best_exact_dist < std::numeric_limits<float>::max())
-                {
-                    const float cur_exact_ratio = hop_best_exact_dist / kth_pq;
-                    if (_edr_ratio_prev > 0.0f)
-                    {
-                        const float delta_exact = cur_exact_ratio - _edr_ratio_prev;
-                        _edr_ema = 0.5f * delta_exact + 0.5f * _edr_ema;
-                        if (_edr_ema > 0.0f)
-                            effective_theta = std::max(1.0f, effective_theta - exact_divergence_k * _edr_ema);
-                    }
-                    _edr_ratio_prev = cur_exact_ratio;
-                }
-                if (best_unexp_pq > kth_pq * effective_theta)
-                    break;
-            }
+            if (kth_pq > 1e-9f && best_unexp_pq > kth_pq * et_theta)
+                break;
         }
         if (hops >= hop_budget)
         {
@@ -1682,7 +1634,6 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         frontier_read_reqs.clear();
         cached_nhoods.clear();
         sector_scratch_idx = 0;
-        hop_best_exact_dist = std::numeric_limits<float>::max();
         // find new beam
         uint32_t num_seen = 0;
         while (retset.has_unexpanded_node() && frontier.size() < beam_width && num_seen < beam_width)
@@ -1771,21 +1722,33 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             float cur_expanded_dist;
             if (global_cache_iter != _coord_cache.end())
             {
-                // Hot path: full-precision coords available in _coord_cache
-                T *node_fp_coords_copy = global_cache_iter->second;
-                if (!_use_disk_index_pq)
+                if (_bounded_cache.enabled())
                 {
-                    cur_expanded_dist =
-                        _dist_cmp->compare(aligned_query_T, node_fp_coords_copy, (uint32_t)_aligned_dim);
+                    // bounded_cache re-rank will compute exact dist for all nodes; use PQ here so
+                    // full_retset holds a uniform scale (PQ lower-bound) for the pre-rerank sort.
+                    // Re-rank will resolve exact dist from _coord_cache (RAM, no disk IO).
+                    uint32_t node_id = (uint32_t)cached_nhood.first;
+                    compute_dists(&node_id, 1, dist_scratch);
+                    cur_expanded_dist = dist_scratch[0];
                 }
                 else
                 {
-                    if (metric == diskann::Metric::INNER_PRODUCT)
+                    // No re-rank: use exact dist directly from _coord_cache (pure RAM).
+                    T *node_fp_coords_copy = global_cache_iter->second;
+                    if (!_use_disk_index_pq)
+                    {
                         cur_expanded_dist =
-                            _disk_pq_table.inner_product(query_float, (uint8_t *)node_fp_coords_copy);
+                            _dist_cmp->compare(aligned_query_T, node_fp_coords_copy, (uint32_t)_aligned_dim);
+                    }
                     else
-                        cur_expanded_dist = _disk_pq_table.l2_distance( // disk_pq does not support OPQ yet
-                            query_float, (uint8_t *)node_fp_coords_copy);
+                    {
+                        if (metric == diskann::Metric::INNER_PRODUCT)
+                            cur_expanded_dist =
+                                _disk_pq_table.inner_product(query_float, (uint8_t *)node_fp_coords_copy);
+                        else
+                            cur_expanded_dist = _disk_pq_table.l2_distance(
+                                query_float, (uint8_t *)node_fp_coords_copy);
+                    }
                 }
             }
             else
@@ -1797,8 +1760,6 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                 cur_expanded_dist = dist_scratch[0];
             }
             full_retset.push_back(Neighbor((uint32_t)cached_nhood.first, cur_expanded_dist));
-            if (exact_divergence_k > 0.0f && cur_expanded_dist < hop_best_exact_dist)
-                hop_best_exact_dist = cur_expanded_dist;
 
             uint64_t nnbrs = cached_nhood.second.first;
             uint32_t *node_nbrs = cached_nhood.second.second;
@@ -1858,23 +1819,34 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                       static_cast<uint32_t>(nnbrs));
             }
 
-            T *node_fp_coords = offset_to_node_coords(node_disk_buf);
-            memcpy(data_buf, node_fp_coords, _disk_bytes_per_point);
             float cur_expanded_dist;
-            if (!_use_disk_index_pq)
+            if (_bounded_cache.enabled())
             {
-                cur_expanded_dist = _dist_cmp->compare(aligned_query_T, data_buf, (uint32_t)_aligned_dim);
+                // bounded_cache re-rank will recompute exact dist for all nodes; use PQ here so
+                // full_retset holds a uniform scale (PQ lower-bound) for the pre-rerank sort.
+                // The sector coords are available in node_disk_buf but re-reading them in re-rank
+                // is unavoidable without a per-query sector cache.
+                uint32_t node_id_u32 = (uint32_t)frontier_nhood.first;
+                compute_dists(&node_id_u32, 1, dist_scratch);
+                cur_expanded_dist = dist_scratch[0];
             }
             else
             {
-                if (metric == diskann::Metric::INNER_PRODUCT)
-                    cur_expanded_dist = _disk_pq_table.inner_product(query_float, (uint8_t *)data_buf);
+                T *node_fp_coords = offset_to_node_coords(node_disk_buf);
+                memcpy(data_buf, node_fp_coords, _disk_bytes_per_point);
+                if (!_use_disk_index_pq)
+                {
+                    cur_expanded_dist = _dist_cmp->compare(aligned_query_T, data_buf, (uint32_t)_aligned_dim);
+                }
                 else
-                    cur_expanded_dist = _disk_pq_table.l2_distance(query_float, (uint8_t *)data_buf);
+                {
+                    if (metric == diskann::Metric::INNER_PRODUCT)
+                        cur_expanded_dist = _disk_pq_table.inner_product(query_float, (uint8_t *)data_buf);
+                    else
+                        cur_expanded_dist = _disk_pq_table.l2_distance(query_float, (uint8_t *)data_buf);
+                }
             }
             full_retset.push_back(Neighbor(frontier_nhood.first, cur_expanded_dist));
-            if (exact_divergence_k > 0.0f && cur_expanded_dist < hop_best_exact_dist)
-                hop_best_exact_dist = cur_expanded_dist;
             uint32_t *node_nbrs = (node_buf + 1);
             // compute node_nbrs <-> query dist in PQ space
             cpu_timer.reset();
@@ -1997,55 +1969,78 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         std::sort(full_retset.begin(), full_retset.end());
     }
 
-    // Phase-3: re-rank top candidates with exact disk reads to fix PQ-approximation
-    // distance error in full_retset caused by cache hits bypassing disk I/O.
+    // Phase-3: re-rank top candidates with exact distances.
+    // full_retset holds uniform PQ distances (set during traversal); this phase overwrites
+    // them with exact distances. Nodes in _coord_cache are resolved in RAM; all others
+    // require a disk read. sector_scratch has MAX_N_SECTOR_READS=512 slots.
     if (_bounded_cache.enabled())
     {
-        // Re-rank all candidates visited during traversal (full_retset.size() ≤ l_search).
-        // Since l_search ≤ MAX_N_SECTOR_READS=128 for our use cases, the sector_scratch
-        // buffer is guaranteed to hold all candidates. Any remainder with stale PQ distances
-        // is erased after the exact re-read so sorting gives correct order.
         const size_t rerank_n = std::min(full_retset.size(), defaults::MAX_N_SECTOR_READS);
         if (full_retset.size() > rerank_n)
             full_retset.erase(full_retset.begin() + rerank_n, full_retset.end());
 
-        std::vector<AlignedRead> rerank_reqs;
-        rerank_reqs.reserve(rerank_n);
+        // Pass 1: resolve _coord_cache hits in RAM (no disk IO).
+        std::vector<size_t> disk_slots;
+        disk_slots.reserve(rerank_n);
         for (size_t i = 0; i < rerank_n; ++i)
         {
+            auto coord_it = _coord_cache.find(full_retset[i].id);
+            if (coord_it != _coord_cache.end())
+            {
+                if (!_use_disk_index_pq)
+                    full_retset[i].distance =
+                        _dist_cmp->compare(aligned_query_T, coord_it->second, (uint32_t)_aligned_dim);
+                else
+                    full_retset[i].distance =
+                        (metric == diskann::Metric::INNER_PRODUCT)
+                            ? _disk_pq_table.inner_product(query_float, (uint8_t *)coord_it->second)
+                            : _disk_pq_table.l2_distance(query_float, (uint8_t *)coord_it->second);
+            }
+            else
+            {
+                disk_slots.push_back(i);
+            }
+        }
+
+        // Pass 2: batch disk read for nodes not in _coord_cache.
+        // disk_slots[j] → full_retset index; sector_scratch slot j is reused for each.
+        std::vector<AlignedRead> rerank_reqs;
+        rerank_reqs.reserve(disk_slots.size());
+        for (size_t j = 0; j < disk_slots.size(); ++j)
+        {
             rerank_reqs.emplace_back(
-                get_node_sector((size_t)full_retset[i].id) * defaults::SECTOR_LEN,
+                get_node_sector((size_t)full_retset[disk_slots[j]].id) * defaults::SECTOR_LEN,
                 num_sectors_per_node * defaults::SECTOR_LEN,
-                sector_scratch + i * num_sectors_per_node * defaults::SECTOR_LEN);
+                sector_scratch + j * num_sectors_per_node * defaults::SECTOR_LEN);
             if (stats != nullptr)
             {
                 stats->n_4k++;
                 stats->n_ios++;
             }
         }
-        io_timer.reset();
-        reader->read(rerank_reqs, ctx);
-        if (stats != nullptr)
-            stats->io_us += (float)io_timer.elapsed();
-
-        for (size_t i = 0; i < rerank_n; ++i)
+        if (!rerank_reqs.empty())
         {
-            char *node_disk_buf = offset_to_node(
-                sector_scratch + i * (size_t)num_sectors_per_node * defaults::SECTOR_LEN,
-                full_retset[i].id);
-            T *node_coords = offset_to_node_coords(node_disk_buf);
-            memcpy(data_buf, node_coords, _disk_bytes_per_point);
-            if (!_use_disk_index_pq)
+            io_timer.reset();
+            reader->read(rerank_reqs, ctx);
+            if (stats != nullptr)
+                stats->io_us += (float)io_timer.elapsed();
+
+            for (size_t j = 0; j < disk_slots.size(); ++j)
             {
-                full_retset[i].distance =
-                    _dist_cmp->compare(aligned_query_T, data_buf, (uint32_t)_aligned_dim);
-            }
-            else
-            {
-                full_retset[i].distance =
-                    (metric == diskann::Metric::INNER_PRODUCT)
-                        ? _disk_pq_table.inner_product(query_float, (uint8_t *)data_buf)
-                        : _disk_pq_table.l2_distance(query_float, (uint8_t *)data_buf);
+                size_t i = disk_slots[j];
+                char *node_disk_buf = offset_to_node(
+                    sector_scratch + j * (size_t)num_sectors_per_node * defaults::SECTOR_LEN,
+                    full_retset[i].id);
+                T *node_coords = offset_to_node_coords(node_disk_buf);
+                memcpy(data_buf, node_coords, _disk_bytes_per_point);
+                if (!_use_disk_index_pq)
+                    full_retset[i].distance =
+                        _dist_cmp->compare(aligned_query_T, data_buf, (uint32_t)_aligned_dim);
+                else
+                    full_retset[i].distance =
+                        (metric == diskann::Metric::INNER_PRODUCT)
+                            ? _disk_pq_table.inner_product(query_float, (uint8_t *)data_buf)
+                            : _disk_pq_table.l2_distance(query_float, (uint8_t *)data_buf);
             }
         }
         std::sort(full_retset.begin(), full_retset.end());

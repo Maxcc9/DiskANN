@@ -125,11 +125,10 @@ template <typename T> class SearchServer
 {
   public:
     SearchServer(const std::string &index_prefix, const diskann::Metric metric, const uint32_t num_nodes_to_cache,
-                 const uint32_t num_threads, const uint32_t beamwidth, const float frontier_divergence_k,
-                 const float exact_divergence_k, const bool enable_neighbor_cache,
-                 const double neighbor_cache_gb)
-        : _beamwidth(beamwidth), _frontier_divergence_k(frontier_divergence_k),
-          _exact_divergence_k(exact_divergence_k)
+                 const uint32_t num_threads, const uint32_t beamwidth,
+                 const float et_sat_gamma, const uint32_t et_sat_delta,
+                 const bool enable_neighbor_cache, const double neighbor_cache_gb)
+        : _beamwidth(beamwidth), _et_sat_gamma(et_sat_gamma), _et_sat_delta(et_sat_delta)
     {
 #ifdef _WINDOWS
         static_assert(false, "search_server is currently implemented for POSIX platforms only.");
@@ -342,18 +341,13 @@ template <typename T> class SearchServer
         std::vector<uint64_t> result_ids(request.k);
         std::vector<float> result_dists(request.k);
 
-        if (request.et_theta > 0.0f)
-        {
-            _index->cached_beam_search(query.data(), request.k, request.l, result_ids.data(), result_dists.data(),
-                                       _beamwidth, request.et_theta, 0.0f,
-                                       std::numeric_limits<uint32_t>::max(), 1.0f, 0,
-                                       _frontier_divergence_k, _exact_divergence_k);
-        }
-        else
-        {
-            _index->cached_beam_search(query.data(), request.k, request.l, result_ids.data(), result_dists.data(),
-                                       _beamwidth);
-        }
+        // et_theta <= 0 from client means "no θ-ET"; pass FLOAT_MAX to disable the check.
+        const float theta = request.et_theta > 0.0f ? request.et_theta
+                                                     : std::numeric_limits<float>::max();
+        _index->cached_beam_search(query.data(), request.k, request.l, result_ids.data(), result_dists.data(),
+                                   _beamwidth, theta,
+                                   std::numeric_limits<uint32_t>::max(),
+                                   _et_sat_gamma, _et_sat_delta);
 
         const auto end = std::chrono::steady_clock::now();
         const uint64_t server_us =
@@ -381,8 +375,8 @@ template <typename T> class SearchServer
     uint64_t _dimensions = 0;
     uint64_t _client_dimensions = 0;  // == _dimensions except for MIPS where it's _dimensions-1
     uint32_t _beamwidth = 4;
-    float _frontier_divergence_k = 0.4f;
-    float _exact_divergence_k = 0.0f;
+    float    _et_sat_gamma = 1.0f;
+    uint32_t _et_sat_delta = 0;
 
     std::queue<int> _fd_queue;
     std::mutex _queue_mutex;
@@ -393,12 +387,11 @@ template <typename T> class SearchServer
 template <typename T>
 int run_search_server(const std::string &index_path_prefix, const diskann::Metric metric,
                       const uint32_t num_nodes_to_cache, const uint32_t num_threads, const uint32_t beamwidth,
-                      const float frontier_divergence_k, const float exact_divergence_k, const uint16_t port,
+                      const float et_sat_gamma, const uint32_t et_sat_delta, const uint16_t port,
                       const bool enable_neighbor_cache, const double neighbor_cache_gb)
 {
     SearchServer<T> server(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                            frontier_divergence_k, exact_divergence_k, enable_neighbor_cache,
-                            neighbor_cache_gb);
+                            et_sat_gamma, et_sat_delta, enable_neighbor_cache, neighbor_cache_gb);
     server.serve(port, num_threads);
     return 0;
 }
@@ -414,8 +407,8 @@ int main(int argc, char **argv)
     uint32_t num_threads = static_cast<uint32_t>(omp_get_num_procs());
     uint32_t num_nodes_to_cache = 0;
     uint32_t beamwidth = 4;
-    float frontier_divergence_k = 0.4f;
-    float exact_divergence_k = 0.0f;
+    float    et_sat_gamma = 1.0f;
+    uint32_t et_sat_delta = 0;
     bool enable_neighbor_cache = false;
     double neighbor_cache_gb = 0.0;
 
@@ -436,12 +429,12 @@ int main(int argc, char **argv)
                            "Number of nodes to cache during search");
         desc.add_options()("beamwidth", po::value<uint32_t>(&beamwidth)->default_value(4),
                            "Beamwidth used for each search");
-        desc.add_options()("frontier_divergence_k",
-                           po::value<float>(&frontier_divergence_k)->default_value(0.4f),
-                           "PQ Divergence Rate coefficient for adaptive ET (0=disabled, 0.4=recommended)");
-        desc.add_options()("exact_divergence_k",
-                           po::value<float>(&exact_divergence_k)->default_value(0.0f),
-                           "Exact Divergence Rate coefficient (uses actual expanded distances; 0=disabled, 0.4=recommended)");
+        desc.add_options()("et_sat_gamma",
+                           po::value<float>(&et_sat_gamma)->default_value(1.0f),
+                           "Top-k saturation threshold: fraction of top-k IDs that must be stable to count as a converged hop (0=disabled, 0.9=recommended)");
+        desc.add_options()("et_sat_delta",
+                           po::value<uint32_t>(&et_sat_delta)->default_value(0),
+                           "Top-k saturation patience: number of consecutive stable hops before early termination (0=disabled, 3=recommended)");
         desc.add_options()("enable_neighbor_cache",
                            po::bool_switch(&enable_neighbor_cache)->default_value(false),
                            "Preload ALL neighbor IDs into DRAM at startup (Phase-1); eliminates graph I/Os during beam search traversal");
@@ -484,19 +477,19 @@ int main(int argc, char **argv)
         if (data_type == "float")
         {
             return run_search_server<float>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                            frontier_divergence_k, exact_divergence_k, port,
+                                            et_sat_gamma, et_sat_delta, port,
                                             enable_neighbor_cache, neighbor_cache_gb);
         }
         if (data_type == "int8")
         {
             return run_search_server<int8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                             frontier_divergence_k, exact_divergence_k, port,
+                                             et_sat_gamma, et_sat_delta, port,
                                              enable_neighbor_cache, neighbor_cache_gb);
         }
         if (data_type == "uint8")
         {
             return run_search_server<uint8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                                              frontier_divergence_k, exact_divergence_k, port,
+                                              et_sat_gamma, et_sat_delta, port,
                                               enable_neighbor_cache, neighbor_cache_gb);
         }
 
