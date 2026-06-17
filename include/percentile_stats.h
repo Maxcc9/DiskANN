@@ -32,7 +32,9 @@ struct QueryStats
     unsigned n_cmps_saved = 0; // # cmps saved
     unsigned n_cmps = 0;       // # cmps
     unsigned n_cache_hits = 0; // # cache_hits
-    unsigned n_hops = 0;       // # search hops
+    unsigned n_hops = 0;       // # search hops (SSD sector hops, excludes cache hits)
+    unsigned n_beam_hops = 0;  // # beam search iterations (true hop count including cache hits)
+    unsigned oracle_hops = 0;  // first hop where top-K covers all GT K-NNs (set when gt_ids provided)
 };
 
 template <typename T>

@@ -98,8 +98,11 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
                                               const uint32_t hop_budget = std::numeric_limits<uint32_t>::max(),
                                               const float et_sat_gamma = 1.0f,
                                               const uint32_t et_sat_delta = 0,
+                                              const float et_theta_exact = std::numeric_limits<float>::max(),
+                                              const uint32_t et_conv_delta = 0,
                                               const bool use_reorder_data = false,
-                                              QueryStats *stats = nullptr);
+                                              QueryStats *stats = nullptr,
+                                              const uint32_t *oracle_gt_ids = nullptr);
 
     DISKANN_DLLEXPORT LabelT get_converted_label(const std::string &filter_label);
 

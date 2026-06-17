@@ -814,9 +814,10 @@ uint32_t optimize_beamwidth(std::unique_ptr<diskann::PQFlashIndex<T, LabelT>> &p
             pFlashIndex->cached_beam_search(tuning_sample + (i * tuning_sample_aligned_dim), 1, L,
                                             tuning_sample_result_ids_64.data() + (i * 1),
                                             tuning_sample_result_dists.data() + (i * 1), cur_bw,
-                                            std::numeric_limits<float>::max(), 0.0f,
-                                            std::numeric_limits<uint32_t>::max(), 1.0f, 0, 0.0f, 0.0f,
-                                            false, stats + i);
+                                            std::numeric_limits<float>::max(),   // et_theta: disabled
+                                            std::numeric_limits<uint32_t>::max(), // hop_budget: disabled
+                                            1.0f, 0,                             // sat_gamma, sat_delta
+                                            false, stats + i);                   // use_reorder, stats
         }
         auto e = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> diff = e - s;
