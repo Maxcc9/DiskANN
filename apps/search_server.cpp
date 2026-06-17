@@ -127,8 +127,10 @@ template <typename T> class SearchServer
     SearchServer(const std::string &index_prefix, const diskann::Metric metric, const uint32_t num_nodes_to_cache,
                  const uint32_t num_threads, const uint32_t beamwidth,
                  const float et_sat_gamma, const uint32_t et_sat_delta,
-                 const bool enable_neighbor_cache, const double neighbor_cache_gb)
-        : _beamwidth(beamwidth), _et_sat_gamma(et_sat_gamma), _et_sat_delta(et_sat_delta)
+                 const bool enable_neighbor_cache, const double neighbor_cache_gb,
+                 const float qd_alpha, const uint32_t io_concurrency)
+        : _beamwidth(beamwidth), _et_sat_gamma(et_sat_gamma), _et_sat_delta(et_sat_delta),
+          _qd_alpha(qd_alpha), _io_concurrency(io_concurrency)
     {
 #ifdef _WINDOWS
         static_assert(false, "search_server is currently implemented for POSIX platforms only.");
@@ -184,6 +186,7 @@ template <typename T> class SearchServer
         {
             throw std::invalid_argument("num_threads must be non-zero");
         }
+        _num_threads = worker_threads;
 
         const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd < 0)
@@ -342,12 +345,43 @@ template <typename T> class SearchServer
         std::vector<float> result_dists(request.k);
 
         // et_theta <= 0 from client means "no θ-ET"; pass FLOAT_MAX to disable the check.
-        const float theta = request.et_theta > 0.0f ? request.et_theta
-                                                     : std::numeric_limits<float>::max();
+        float theta = request.et_theta > 0.0f ? request.et_theta
+                                              : std::numeric_limits<float>::max();
+
+        // Queue-depth adaptive theta: relax ET threshold under server load.
+        // active_searches counts requests currently inside cached_beam_search.
+        // load_ratio = active / num_threads; clamped to [0, 4] to bound max relaxation.
+        if (_qd_alpha > 0.0f && theta < std::numeric_limits<float>::max())
+        {
+            const float load_ratio = std::min(
+                static_cast<float>(_active_searches.load(std::memory_order_relaxed)) /
+                std::max(1.0f, static_cast<float>(_num_threads)),
+                4.0f);
+            theta *= (1.0f + _qd_alpha * load_ratio);
+        }
+
+        // hop_budget = L: each query runs at most L outer search iterations.
+        // Cache-hit iterations skip SSD reads, so cache-heavy queries explore
+        // more neighbours for the same iteration budget (implicit cache-guided ET).
+        const uint32_t hop_budget = request.l;
+
+        _active_searches.fetch_add(1, std::memory_order_relaxed);
+
+        // io_concurrency: target total in-flight SSD reads across all threads.
+        // Effective beam_width = io_concurrency / active_searches, clamped to [1, _beamwidth].
+        // Reduces per-query SSD read concurrency under load, controlling NVMe queue depth.
+        // 0 = disabled (use full _beamwidth always).
+        const uint32_t eff_bw = (_io_concurrency > 0)
+            ? std::min(_beamwidth,
+                       std::max(1u, _io_concurrency /
+                                std::max(1u, static_cast<uint32_t>(
+                                    _active_searches.load(std::memory_order_relaxed)))))
+            : _beamwidth;
+
         _index->cached_beam_search(query.data(), request.k, request.l, result_ids.data(), result_dists.data(),
-                                   _beamwidth, theta,
-                                   std::numeric_limits<uint32_t>::max(),
+                                   eff_bw, theta, hop_budget,
                                    _et_sat_gamma, _et_sat_delta);
+        _active_searches.fetch_sub(1, std::memory_order_relaxed);
 
         const auto end = std::chrono::steady_clock::now();
         const uint64_t server_us =
@@ -377,6 +411,11 @@ template <typename T> class SearchServer
     uint32_t _beamwidth = 4;
     float    _et_sat_gamma = 1.0f;
     uint32_t _et_sat_delta = 0;
+    float    _qd_alpha = 0.0f;       // queue-depth adaptive theta coefficient (0 = disabled)
+    uint32_t _io_concurrency = 0;    // target concurrent in-flight SSD reads (0 = disabled)
+    uint32_t _num_threads = 1;
+
+    std::atomic<int32_t> _active_searches{0};  // requests currently inside cached_beam_search
 
     std::queue<int> _fd_queue;
     std::mutex _queue_mutex;
@@ -388,10 +427,12 @@ template <typename T>
 int run_search_server(const std::string &index_path_prefix, const diskann::Metric metric,
                       const uint32_t num_nodes_to_cache, const uint32_t num_threads, const uint32_t beamwidth,
                       const float et_sat_gamma, const uint32_t et_sat_delta, const uint16_t port,
-                      const bool enable_neighbor_cache, const double neighbor_cache_gb)
+                      const bool enable_neighbor_cache, const double neighbor_cache_gb,
+                      const float qd_alpha, const uint32_t io_concurrency)
 {
     SearchServer<T> server(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
-                            et_sat_gamma, et_sat_delta, enable_neighbor_cache, neighbor_cache_gb);
+                            et_sat_gamma, et_sat_delta, enable_neighbor_cache, neighbor_cache_gb,
+                            qd_alpha, io_concurrency);
     server.serve(port, num_threads);
     return 0;
 }
@@ -411,6 +452,8 @@ int main(int argc, char **argv)
     uint32_t et_sat_delta = 0;
     bool enable_neighbor_cache = false;
     double neighbor_cache_gb = 0.0;
+    float    qd_alpha = 0.0f;
+    uint32_t io_concurrency = 0;
 
     po::options_description desc{"Arguments"};
     try
@@ -441,6 +484,17 @@ int main(int argc, char **argv)
         desc.add_options()("neighbor_cache_gb",
                            po::value<double>(&neighbor_cache_gb)->default_value(0.0),
                            "Phase-3 bounded neighbor-ID cache size in GB (0=disabled); takes precedence over --enable_neighbor_cache when > 0");
+        desc.add_options()("qd_alpha",
+                           po::value<float>(&qd_alpha)->default_value(0.0f),
+                           "Queue-depth adaptive theta coefficient (0=disabled). When >0, ET threshold is "
+                           "relaxed as theta *= (1 + qd_alpha * load_ratio), where load_ratio = "
+                           "active_searches / num_threads, clamped to [0,4]. Recommended: 0.1-0.3");
+        desc.add_options()("io_concurrency",
+                           po::value<uint32_t>(&io_concurrency)->default_value(0),
+                           "Target total in-flight SSD reads across all threads (0=disabled). "
+                           "Effective beam_width = min(beamwidth, io_concurrency / active_searches). "
+                           "Reduces NVMe queue depth under high concurrency at cost of exploration width. "
+                           "Recommended starting point: beamwidth * num_threads / 2");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -478,19 +532,19 @@ int main(int argc, char **argv)
         {
             return run_search_server<float>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                                             et_sat_gamma, et_sat_delta, port,
-                                            enable_neighbor_cache, neighbor_cache_gb);
+                                            enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency);
         }
         if (data_type == "int8")
         {
             return run_search_server<int8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                                              et_sat_gamma, et_sat_delta, port,
-                                             enable_neighbor_cache, neighbor_cache_gb);
+                                             enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency);
         }
         if (data_type == "uint8")
         {
             return run_search_server<uint8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                                               et_sat_gamma, et_sat_delta, port,
-                                              enable_neighbor_cache, neighbor_cache_gb);
+                                              enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency);
         }
 
         std::cerr << "Unsupported data type " << data_type << std::endl;
