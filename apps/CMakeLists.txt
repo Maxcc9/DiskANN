@@ -22,6 +22,9 @@ target_link_libraries(search_disk_index ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} ${D
 add_executable(search_server search_server.cpp)
 target_link_libraries(search_server ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} Boost::program_options)
 
+add_executable(oracle_hop_analysis oracle_hop_analysis.cpp)
+target_link_libraries(oracle_hop_analysis ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} ${DISKANN_TOOLS_TCMALLOC_LINK_OPTIONS} Boost::program_options)
+
 add_executable(range_search_disk_index range_search_disk_index.cpp)
 target_link_libraries(range_search_disk_index ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} ${DISKANN_TOOLS_TCMALLOC_LINK_OPTIONS} Boost::program_options)
 

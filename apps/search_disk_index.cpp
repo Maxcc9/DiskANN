@@ -57,7 +57,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       const std::vector<std::string> &query_filters, const bool use_reorder_data = false,
                       const float et_theta = std::numeric_limits<float>::max(), const float et_dk = 0.0f,
                       const uint32_t hop_budget = std::numeric_limits<uint32_t>::max(),
-                      const float et_sat_gamma = 1.0f, const uint32_t et_sat_delta = 0)
+                      const float et_sat_gamma = 1.0f, const uint32_t et_sat_delta = 0,
+                      const double neighbor_cache_gb = 0.0)
 {
     diskann::cout << "Search parameters: #threads: " << num_threads << ", ";
     if (beamwidth <= 0)
@@ -126,12 +127,16 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     std::vector<uint32_t> node_list;
     diskann::cout << "Caching " << num_nodes_to_cache << " nodes around medoid(s)" << std::endl;
     _pFlashIndex->cache_bfs_levels(num_nodes_to_cache, node_list);
-    // if (num_nodes_to_cache > 0)
-    //     _pFlashIndex->generate_cache_list_from_sample_queries(warmup_query_file, 15, 6, num_nodes_to_cache,
-    //     num_threads, node_list);
     _pFlashIndex->load_cache_list(node_list);
     node_list.clear();
     node_list.shrink_to_fit();
+
+    if (neighbor_cache_gb > 0.0)
+    {
+        size_t capacity_bytes = static_cast<size_t>(neighbor_cache_gb * 1024.0 * 1024.0 * 1024.0);
+        _pFlashIndex->init_bounded_neighbor_cache(capacity_bytes);
+        diskann::cout << "[BNC] Bounded neighbor cache enabled: " << neighbor_cache_gb << " GB" << std::endl;
+    }
 
     omp_set_num_threads(num_threads);
 
@@ -172,7 +177,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         {
             _pFlashIndex->cached_beam_search(warmup + (i * warmup_aligned_dim), 1, warmup_L,
                                              warmup_result_ids_64.data() + (i * 1),
-                                             warmup_result_dists.data() + (i * 1), 4, et_theta, et_dk, hop_budget,
+                                             warmup_result_dists.data() + (i * 1), 4, et_theta, hop_budget,
                                              et_sat_gamma, et_sat_delta);
         }
         diskann::cout << "..done" << std::endl;
@@ -238,7 +243,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                 _pFlashIndex->cached_beam_search(query + (i * query_aligned_dim), recall_at, L,
                                                  query_result_ids_64.data() + (i * recall_at),
                                                  query_result_dists[test_id].data() + (i * recall_at),
-                                                 optimized_beamwidth, et_theta, et_dk, hop_budget,
+                                                 optimized_beamwidth, et_theta, hop_budget,
                                                  et_sat_gamma, et_sat_delta, use_reorder_data, stats + i);
             }
             else
@@ -255,7 +260,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                 _pFlashIndex->cached_beam_search(
                     query + (i * query_aligned_dim), recall_at, L, query_result_ids_64.data() + (i * recall_at),
                     query_result_dists[test_id].data() + (i * recall_at), optimized_beamwidth, true, label_for_search,
-                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, use_reorder_data, stats + i);
+                    et_theta, hop_budget, et_sat_gamma, et_sat_delta, use_reorder_data, stats + i);
             }
         }
         auto e = std::chrono::high_resolution_clock::now();
@@ -280,6 +285,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         auto mean_ios = diskann::get_mean_stats<uint32_t>(stats, query_num,
                                                           [](const diskann::QueryStats &stats) { return stats.n_ios; });
 
+        auto mean_hops = diskann::get_mean_stats<uint32_t>(stats, query_num,
+                                                           [](const diskann::QueryStats &stats) { return stats.n_beam_hops; });
+
         auto mean_cpuus = diskann::get_mean_stats<float>(stats, query_num,
                                                          [](const diskann::QueryStats &stats) { return stats.cpu_us; });
 
@@ -296,14 +304,24 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 
         diskann::cout << std::setw(6) << L << std::setw(12) << optimized_beamwidth << std::setw(16) << qps
                       << std::setw(16) << mean_latency << std::setw(16) << latency_50 << std::setw(16) << latency_99
-                      << std::setw(16) << latency_999 << std::setw(16) << mean_ios << std::setw(16) << mean_io_us
-                      << std::setw(16) << mean_cpuus;
+                      << std::setw(16) << latency_999 << std::setw(16) << mean_ios << std::setw(12) << mean_hops
+                      << std::setw(16) << mean_io_us << std::setw(16) << mean_cpuus;
         if (calc_recall_flag)
         {
             diskann::cout << std::setw(16) << recall << std::endl;
         }
         else
             diskann::cout << std::endl;
+
+        // Save per-query hop counts for oracle hop post-hoc analysis
+        {
+            std::string hops_path = result_output_prefix + "_" + std::to_string(L) + "_hops_uint32.bin";
+            std::vector<uint32_t> per_query_hops(query_num);
+            for (size_t qi = 0; qi < query_num; qi++)
+                per_query_hops[qi] = stats[qi].n_beam_hops;
+            diskann::save_bin<uint32_t>(hops_path, per_query_hops.data(), query_num, 1);
+        }
+
         delete[] stats;
     }
 
@@ -340,6 +358,7 @@ int main(int argc, char **argv)
     uint32_t hop_budget = std::numeric_limits<uint32_t>::max();
     float et_sat_gamma = 1.0f;
     uint32_t et_sat_delta = 0;
+    double neighbor_cache_gb = 0.0;
 
     po::options_description desc{
         program_options_utils::make_program_description("search_disk_index", "Searches on-disk DiskANN indexes")};
@@ -405,6 +424,9 @@ int main(int argc, char **argv)
                                        "Top-k saturation gamma threshold [0,1]. Default 1.0 = disabled.");
         optional_configs.add_options()("et_sat_delta", po::value<uint32_t>(&et_sat_delta)->default_value(0),
                                        "Top-k saturation consecutive stable hops needed. Default 0 = disabled.");
+        optional_configs.add_options()("neighbor_cache_gb",
+                                       po::value<double>(&neighbor_cache_gb)->default_value(0.0),
+                                       "Bounded neighbor cache size in GB (0 = disabled). Shared across queries.");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -485,17 +507,17 @@ int main(int argc, char **argv)
                 return search_disk_index<float, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta);
+                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta);
+                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta);
+                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;
@@ -508,17 +530,17 @@ int main(int argc, char **argv)
                 return search_disk_index<float>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                 num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                 fail_if_recall_below, query_filters, use_reorder_data, et_theta,
-                                                et_dk, hop_budget, et_sat_gamma, et_sat_delta);
+                                                et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                  num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                  fail_if_recall_below, query_filters, use_reorder_data, et_theta,
-                                                 et_dk, hop_budget, et_sat_gamma, et_sat_delta);
+                                                 et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                   num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                   fail_if_recall_below, query_filters, use_reorder_data, et_theta,
-                                                  et_dk, hop_budget, et_sat_gamma, et_sat_delta);
+                                                  et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;
