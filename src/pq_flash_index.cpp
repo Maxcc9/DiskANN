@@ -1420,6 +1420,20 @@ bool getNextCompletedRequest(std::shared_ptr<AlignedFileReader> &reader, IOConte
 #endif
 
 template <typename T, typename LabelT>
+void PQFlashIndex<T, LabelT>::load_entry_candidates(const std::string &file)
+{
+    std::ifstream in(file, std::ios::binary);
+    if (!in.is_open())
+        throw ANNException("Could not open entry_candidates file: " + file, -1, __FUNCSIG__, __FILE__, __LINE__);
+    uint32_t count = 0;
+    in.read(reinterpret_cast<char *>(&count), sizeof(uint32_t));
+    _entry_candidates.resize(count);
+    in.read(reinterpret_cast<char *>(_entry_candidates.data()), (std::streamsize)count * sizeof(uint32_t));
+    diskann::cout << "[EntryRouter] loaded " << _entry_candidates.size() << " entry candidates from " << file
+                  << std::endl;
+}
+
+template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const float et_theta, const uint32_t hop_budget,
@@ -1593,6 +1607,27 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         }
     }
 
+    // T4 query-adaptive entry router: replace the global medoid with the nearest
+    // entry candidate (by PQ distance). Candidates are processed in batches that
+    // fit the PQ scratch (sized for MAX_GRAPH_DEGREE), tracking the global min.
+    if (!use_filter && !_entry_candidates.empty())
+    {
+        const size_t BATCH = 256;
+        for (size_t off = 0; off < _entry_candidates.size(); off += BATCH)
+        {
+            const uint32_t cnt = (uint32_t)std::min(BATCH, _entry_candidates.size() - off);
+            compute_dists(_entry_candidates.data() + off, cnt, dist_scratch);
+            for (uint32_t j = 0; j < cnt; j++)
+            {
+                if (dist_scratch[j] < best_dist)
+                {
+                    best_dist = dist_scratch[j];
+                    best_medoid = _entry_candidates[off + j];
+                }
+            }
+        }
+    }
+
     compute_dists(&best_medoid, 1, dist_scratch);
     retset.insert(Neighbor(best_medoid, dist_scratch[0]));
     visited.insert(best_medoid);
@@ -1641,18 +1676,13 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         }
 
         // Exact-kth ET: compare best unexpanded PQ distance against the K-th EXACT distance
-        // among already-expanded nodes in full_retset.
-        // More accurate than θ-ET because kth_exact is the true distance of the K-th best
-        // expanded node, not a PQ approximation. Fires earlier with less recall loss.
-        if (et_theta_exact < std::numeric_limits<float>::max() && full_retset.size() >= k_search)
+        // tracked by conv_topk (max-heap, O(1) access).  conv_topk is maintained jointly with
+        // et_conv_delta so no extra overhead when both are enabled.
+        // Guaranteed ET: kth_exact is a true distance, so false-trigger rate is near zero.
+        if (et_theta_exact < std::numeric_limits<float>::max() && conv_topk.size() >= k_search)
         {
             const float best_unexp_pq = retset.peek_unexpanded_dist();
-            // Find K-th smallest exact distance in full_retset via nth_element (O(N), non-destructive).
-            std::vector<float> frt_dists;
-            frt_dists.reserve(full_retset.size());
-            for (const auto &n : full_retset) frt_dists.push_back(n.distance);
-            std::nth_element(frt_dists.begin(), frt_dists.begin() + k_search - 1, frt_dists.end());
-            const float kth_exact = frt_dists[k_search - 1];
+            const float kth_exact = conv_topk.top().first; // O(1): max-heap top = k-th best exact dist
             if (kth_exact > 1e-9f && best_unexp_pq > kth_exact * et_theta_exact)
                 break;
         }
@@ -1720,6 +1750,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         {
             if (stats != nullptr)
                 stats->n_hops++;
+            _global_io_count.fetch_add(frontier.size(), std::memory_order_relaxed); // T5: count SSD reads
             for (uint64_t i = 0; i < frontier.size(); i++)
             {
                 auto id = frontier[i];
@@ -1802,7 +1833,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                 cur_expanded_dist = dist_scratch[0];
             }
             full_retset.push_back(Neighbor(node_id, cur_expanded_dist));
-            if (et_conv_delta > 0)
+            if (et_conv_delta > 0 || et_theta_exact < std::numeric_limits<float>::max())
             {
                 if ((uint32_t)conv_topk.size() < k_search)
                 { conv_topk.push({cur_expanded_dist, node_id}); hop_topk_changed = true; }
@@ -1886,7 +1917,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             }
             exact_dist_nodes.insert(static_cast<uint32_t>(frontier_nhood.first));
             full_retset.push_back(Neighbor(frontier_nhood.first, cur_expanded_dist));
-            if (et_conv_delta > 0)
+            if (et_conv_delta > 0 || et_theta_exact < std::numeric_limits<float>::max())
             {
                 if ((uint32_t)conv_topk.size() < k_search)
                 { conv_topk.push({cur_expanded_dist, (uint32_t)frontier_nhood.first}); hop_topk_changed = true; }

@@ -128,7 +128,8 @@ template <typename T> class SearchServer
                  const uint32_t num_threads, const uint32_t beamwidth,
                  const float et_sat_gamma, const uint32_t et_sat_delta,
                  const bool enable_neighbor_cache, const double neighbor_cache_gb,
-                 const float qd_alpha, const uint32_t io_concurrency)
+                 const float qd_alpha, const uint32_t io_concurrency,
+                 const std::string &entry_candidates_file = "")
         : _beamwidth(beamwidth), _et_sat_gamma(et_sat_gamma), _et_sat_delta(et_sat_delta),
           _qd_alpha(qd_alpha), _io_concurrency(io_concurrency)
     {
@@ -165,6 +166,11 @@ template <typename T> class SearchServer
         else
         {
             std::cout << "[BoundedCache] Disabled (pass --neighbor_cache_gb N to enable)" << std::endl;
+        }
+
+        if (!entry_candidates_file.empty())
+        {
+            _index->load_entry_candidates(entry_candidates_file);
         }
 
         _dimensions = _index->get_data_dim();
@@ -318,7 +324,28 @@ template <typename T> class SearchServer
         {
             throw std::runtime_error("failed to read request header");
         }
-        if (request.k == 0 || request.l == 0)
+
+        // Control message: k == 0 signals a control command (no query vector body).
+        //   l == 1 → freeze bounded cache (lock warm state; stop inserts)
+        //   l == 2 → unfreeze bounded cache (resume inserts)
+        // Reply is a bare 12-byte ResponseHeader so the client can synchronise.
+        if (request.k == 0)
+        {
+            uint64_t ctl_ret = 0;
+            if (request.l == 1)
+                _index->set_bounded_cache_frozen(true);
+            else if (request.l == 2)
+                _index->set_bounded_cache_frozen(false);
+            else if (request.l == 3)
+                ctl_ret = _index->get_io_count();   // T5: read global SSD-read counter
+            else if (request.l == 4)
+                _index->reset_io_count();           // T5: reset counter
+            ResponseHeader control_resp{request.query_id, ctl_ret};
+            send_all(client_fd, &control_resp, sizeof(control_resp));
+            return;
+        }
+
+        if (request.l == 0)
         {
             throw std::runtime_error("invalid request parameters");
         }
@@ -428,11 +455,12 @@ int run_search_server(const std::string &index_path_prefix, const diskann::Metri
                       const uint32_t num_nodes_to_cache, const uint32_t num_threads, const uint32_t beamwidth,
                       const float et_sat_gamma, const uint32_t et_sat_delta, const uint16_t port,
                       const bool enable_neighbor_cache, const double neighbor_cache_gb,
-                      const float qd_alpha, const uint32_t io_concurrency)
+                      const float qd_alpha, const uint32_t io_concurrency,
+                      const std::string &entry_candidates_file)
 {
     SearchServer<T> server(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                             et_sat_gamma, et_sat_delta, enable_neighbor_cache, neighbor_cache_gb,
-                            qd_alpha, io_concurrency);
+                            qd_alpha, io_concurrency, entry_candidates_file);
     server.serve(port, num_threads);
     return 0;
 }
@@ -454,6 +482,7 @@ int main(int argc, char **argv)
     double neighbor_cache_gb = 0.0;
     float    qd_alpha = 0.0f;
     uint32_t io_concurrency = 0;
+    std::string entry_candidates_file;
 
     po::options_description desc{"Arguments"};
     try
@@ -495,6 +524,10 @@ int main(int argc, char **argv)
                            "Effective beam_width = min(beamwidth, io_concurrency / active_searches). "
                            "Reduces NVMe queue depth under high concurrency at cost of exploration width. "
                            "Recommended starting point: beamwidth * num_threads / 2");
+        desc.add_options()("entry_candidates_file",
+                           po::value<std::string>(&entry_candidates_file)->default_value(""),
+                           "T4 query-adaptive entry router: file of candidate entry node ids "
+                           "(uint32 count + ids). Each query starts from the nearest candidate.");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -532,19 +565,19 @@ int main(int argc, char **argv)
         {
             return run_search_server<float>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                                             et_sat_gamma, et_sat_delta, port,
-                                            enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency);
+                                            enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file);
         }
         if (data_type == "int8")
         {
             return run_search_server<int8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                                              et_sat_gamma, et_sat_delta, port,
-                                             enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency);
+                                             enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file);
         }
         if (data_type == "uint8")
         {
             return run_search_server<uint8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                                               et_sat_gamma, et_sat_delta, port,
-                                              enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency);
+                                              enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file);
         }
 
         std::cerr << "Unsupported data type " << data_type << std::endl;

@@ -171,7 +171,7 @@ class BoundedNeighborCache
             shard.data     = std::make_unique<uint32_t[]>(
                 static_cast<size_t>(capacity_per_shard_) * max_degree_);
             shard.node_ids = std::make_unique<uint32_t[]>(capacity_per_shard_);
-            shard.ref_bits = std::make_unique<std::atomic<bool>[]>(capacity_per_shard_);
+            shard.ref_counts = std::make_unique<std::atomic<uint8_t>[]>(capacity_per_shard_);
             shard.entries  = std::make_unique<Entry[]>(capacity_per_shard_);
 
             if (coord_bytes_ > 0)
@@ -181,7 +181,7 @@ class BoundedNeighborCache
             for (uint32_t s = 0; s < capacity_per_shard_; ++s)
             {
                 shard.node_ids[s] = UINT32_MAX; // sentinel: empty
-                shard.ref_bits[s].store(false, std::memory_order_relaxed);
+                shard.ref_counts[s].store(0, std::memory_order_relaxed);
                 shard.entries[s].degree    = 0;
                 shard.entries[s].neighbors =
                     shard.data.get() + static_cast<size_t>(s) * max_degree_;
@@ -198,6 +198,13 @@ class BoundedNeighborCache
 
     // Return true if the cache was initialised with a non-zero capacity.
     bool enabled() const { return capacity_per_shard_ > 0; }
+
+    // Freeze / unfreeze the cache.  When frozen, insert() becomes a no-op so the
+    // cache contents are locked to whatever was loaded during a warmup phase.
+    // This lets us measure the steady-state WARM hit-rate without the running
+    // test queries themselves mutating the cache (self-warming contamination).
+    void set_frozen(bool f) { frozen_.store(f, std::memory_order_relaxed); }
+    bool is_frozen() const { return frozen_.load(std::memory_order_relaxed); }
 
     // Check presence without setting ref_bit (used for I/O-aware ET check).
     bool contains(uint32_t node_id) const
@@ -233,7 +240,10 @@ class BoundedNeighborCache
             return nullptr;
 
         const uint32_t slot = it->second;
-        shard.ref_bits[slot].store(true, std::memory_order_relaxed);
+        // Saturating increment: hot nodes accumulate up to MAX_REF_COUNT chances.
+        const uint8_t cur = shard.ref_counts[slot].load(std::memory_order_relaxed);
+        if (cur < MAX_REF_COUNT)
+            shard.ref_counts[slot].store(cur + 1, std::memory_order_relaxed);
         return &shard.entries[slot];
     }
 
@@ -249,6 +259,11 @@ class BoundedNeighborCache
                 const void *coords = nullptr)
     {
         if (capacity_per_shard_ == 0)
+            return;
+
+        // Frozen: cache contents are locked (warmup finished). Skip all inserts
+        // so running test queries cannot mutate the measured warm state.
+        if (frozen_.load(std::memory_order_relaxed))
             return;
 
         const uint32_t shard_idx = node_id % NUM_SHARDS;
@@ -283,7 +298,7 @@ class BoundedNeighborCache
             std::memcpy(shard.entries[slot].coords, coords, coord_bytes_);
 
         shard.node_ids[slot] = node_id;
-        shard.ref_bits[slot].store(false, std::memory_order_relaxed);
+        shard.ref_counts[slot].store(0, std::memory_order_relaxed);
         shard.index[node_id] = slot;
     }
 
@@ -305,7 +320,9 @@ class BoundedNeighborCache
             return false;
 
         const uint32_t slot = it->second;
-        shard.ref_bits[slot].store(true, std::memory_order_relaxed);
+        const uint8_t cur = shard.ref_counts[slot].load(std::memory_order_relaxed);
+        if (cur < MAX_REF_COUNT)
+            shard.ref_counts[slot].store(cur + 1, std::memory_order_relaxed);
         std::memcpy(out_buf, shard.entries[slot].coords, coord_bytes_);
         return true;
     }
@@ -313,35 +330,43 @@ class BoundedNeighborCache
     bool has_coords() const { return coord_bytes_ > 0; }
 
   private:
-    static constexpr uint32_t NUM_SHARDS = 256;
+    static constexpr uint32_t NUM_SHARDS    = 256;
+    // Saturating upper bound for CLOCK ref counter.
+    // Hot nodes (accessed ≥ MAX_REF_COUNT times between eviction sweeps) survive
+    // MAX_REF_COUNT full CLOCK passes rather than just one.
+    static constexpr uint8_t  MAX_REF_COUNT = 4;
 
     struct Shard
     {
-        std::unique_ptr<uint32_t[]>              data;       // [capacity × max_degree]
-        std::unique_ptr<uint8_t[]>               coord_buf;  // [capacity × coord_bytes_]; null if disabled
-        std::unique_ptr<uint32_t[]>              node_ids;   // slot → node_id
-        std::unique_ptr<std::atomic<bool>[]>     ref_bits;   // CLOCK ref bit per slot
-        std::unique_ptr<Entry[]>                 entries;    // pre-built entry table
-        tsl::robin_map<uint32_t, uint32_t>       index;      // node_id → slot
-        mutable std::shared_mutex                mu;
-        uint32_t                                 size{0};
-        uint32_t                                 capacity{0};
-        uint32_t                                 clock_hand{0}; // only touched under unique_lock
+        std::unique_ptr<uint32_t[]>               data;        // [capacity × max_degree]
+        std::unique_ptr<uint8_t[]>                coord_buf;   // [capacity × coord_bytes_]; null if disabled
+        std::unique_ptr<uint32_t[]>               node_ids;    // slot → node_id
+        std::unique_ptr<std::atomic<uint8_t>[]>   ref_counts;  // CLOCK saturation counter per slot
+        std::unique_ptr<Entry[]>                  entries;     // pre-built entry table
+        tsl::robin_map<uint32_t, uint32_t>        index;       // node_id → slot
+        mutable std::shared_mutex                 mu;
+        uint32_t                                  size{0};
+        uint32_t                                  capacity{0};
+        uint32_t                                  clock_hand{0}; // only touched under unique_lock
     };
 
-    // Find a victim slot using the CLOCK algorithm.
+    // Find a victim slot using the CLOCK algorithm with saturating ref counters.
     // Must be called with shard.mu held exclusively (clock_hand is not atomic).
+    // A slot whose ref_count > 0 is given a second chance (decremented); only
+    // a slot with ref_count == 0 is evicted.  Hot nodes that accumulate up to
+    // MAX_REF_COUNT accesses between sweeps survive that many full CLOCK passes.
     static uint32_t find_victim(Shard &shard)
     {
         while (true)
         {
             const uint32_t hand = shard.clock_hand++ % shard.capacity;
-            // exchange(false): if was true → give second chance, keep scanning;
-            //                  if was false → evict this slot.
-            const bool was_ref =
-                shard.ref_bits[hand].exchange(false, std::memory_order_relaxed);
-            if (!was_ref)
-                return hand;
+            const uint8_t  cur  = shard.ref_counts[hand].load(std::memory_order_relaxed);
+            if (cur > 0)
+            {
+                shard.ref_counts[hand].fetch_sub(1, std::memory_order_relaxed);
+                continue;
+            }
+            return hand;
         }
     }
 
@@ -349,6 +374,7 @@ class BoundedNeighborCache
     uint32_t max_degree_{0};
     uint32_t capacity_per_shard_{0};
     size_t   coord_bytes_{0};
+    std::atomic<bool> frozen_{false}; // when true, insert() is a no-op
 };
 
 } // namespace diskann

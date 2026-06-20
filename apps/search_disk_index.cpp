@@ -58,7 +58,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       const float et_theta = std::numeric_limits<float>::max(), const float et_dk = 0.0f,
                       const uint32_t hop_budget = std::numeric_limits<uint32_t>::max(),
                       const float et_sat_gamma = 1.0f, const uint32_t et_sat_delta = 0,
-                      const double neighbor_cache_gb = 0.0)
+                      const double neighbor_cache_gb = 0.0,
+                      const float et_theta_exact = std::numeric_limits<float>::max())
 {
     diskann::cout << "Search parameters: #threads: " << num_threads << ", ";
     if (beamwidth <= 0)
@@ -240,11 +241,16 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         {
             if (!filtered_search)
             {
-                _pFlashIndex->cached_beam_search(query + (i * query_aligned_dim), recall_at, L,
-                                                 query_result_ids_64.data() + (i * recall_at),
-                                                 query_result_dists[test_id].data() + (i * recall_at),
-                                                 optimized_beamwidth, et_theta, hop_budget,
-                                                 et_sat_gamma, et_sat_delta, use_reorder_data, stats + i);
+                // Use the full overload to support et_theta_exact (guaranteed ET via exact kth).
+                _pFlashIndex->cached_beam_search(
+                    query + (i * query_aligned_dim), recall_at, L,
+                    query_result_ids_64.data() + (i * recall_at),
+                    query_result_dists[test_id].data() + (i * recall_at),
+                    optimized_beamwidth, false, (LabelT)0,
+                    std::numeric_limits<uint32_t>::max(),
+                    et_theta, hop_budget, et_sat_gamma, et_sat_delta,
+                    et_theta_exact, 0,
+                    use_reorder_data, stats + i, nullptr);
             }
             else
             {
@@ -258,9 +264,14 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                     label_for_search = _pFlashIndex->get_converted_label(query_filters[i]);
                 }
                 _pFlashIndex->cached_beam_search(
-                    query + (i * query_aligned_dim), recall_at, L, query_result_ids_64.data() + (i * recall_at),
-                    query_result_dists[test_id].data() + (i * recall_at), optimized_beamwidth, true, label_for_search,
-                    et_theta, hop_budget, et_sat_gamma, et_sat_delta, use_reorder_data, stats + i);
+                    query + (i * query_aligned_dim), recall_at, L,
+                    query_result_ids_64.data() + (i * recall_at),
+                    query_result_dists[test_id].data() + (i * recall_at),
+                    optimized_beamwidth, true, label_for_search,
+                    std::numeric_limits<uint32_t>::max(),
+                    et_theta, hop_budget, et_sat_gamma, et_sat_delta,
+                    et_theta_exact, 0,
+                    use_reorder_data, stats + i, nullptr);
             }
         }
         auto e = std::chrono::high_resolution_clock::now();
@@ -359,6 +370,7 @@ int main(int argc, char **argv)
     float et_sat_gamma = 1.0f;
     uint32_t et_sat_delta = 0;
     double neighbor_cache_gb = 0.0;
+    float et_theta_exact = 1e9f;
 
     po::options_description desc{
         program_options_utils::make_program_description("search_disk_index", "Searches on-disk DiskANN indexes")};
@@ -427,6 +439,8 @@ int main(int argc, char **argv)
         optional_configs.add_options()("neighbor_cache_gb",
                                        po::value<double>(&neighbor_cache_gb)->default_value(0.0),
                                        "Bounded neighbor cache size in GB (0 = disabled). Shared across queries.");
+        optional_configs.add_options()("et_theta_exact", po::value<float>(&et_theta_exact)->default_value(1e9f),
+                                       "Guaranteed ET: stop when best_unexp_pq > kth_exact * theta. Default 1e9 (disabled).");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -507,17 +521,17 @@ int main(int argc, char **argv)
                 return search_disk_index<float, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
+                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb, et_theta_exact);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
+                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb, et_theta_exact);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
+                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb, et_theta_exact);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;

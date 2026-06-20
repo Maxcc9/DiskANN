@@ -113,6 +113,27 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
 
     DISKANN_DLLEXPORT uint64_t get_data_dim();
 
+    // Freeze/unfreeze the bounded neighbor cache (BNC).  When frozen, the cache
+    // stops accepting inserts so a warmup-populated state can be measured without
+    // the test queries themselves further mutating it.
+    void set_bounded_cache_frozen(bool frozen) { _bounded_cache.set_frozen(frozen); }
+    bool is_bounded_cache_frozen() const { return _bounded_cache.is_frozen(); }
+
+    // Query-adaptive entry router (T4): load a set of candidate entry node ids
+    // (e.g. K-means centroids mapped to graph nodes).  When loaded, each query
+    // starts from the nearest candidate (by PQ distance) instead of the global
+    // medoid, shortening the routing path for queries far from the medoid.
+    DISKANN_DLLEXPORT void load_entry_candidates(const std::string &file);
+    bool has_entry_router() const { return !_entry_candidates.empty(); }
+
+    // T5: global SSD frontier-read counter (atomic). Counts physical node reads
+    // issued across all concurrent queries.  Used to measure the cooperative-IO
+    // effect of the shared cache: reads/query should fall as concurrency rises if
+    // concurrent queries populate the cache for each other.
+    std::atomic<uint64_t> _global_io_count{0};
+    uint64_t get_io_count() const { return _global_io_count.load(std::memory_order_relaxed); }
+    void reset_io_count() { _global_io_count.store(0, std::memory_order_relaxed); }
+
     std::shared_ptr<AlignedFileReader> &reader;
 
     DISKANN_DLLEXPORT diskann::Metric get_metric();
@@ -262,6 +283,9 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
 
     // Phase-3 bounded on-demand neighbor-ID cache (CLOCK eviction)
     BoundedNeighborCache _bounded_cache;
+
+    // T4: query-adaptive entry router candidate node ids (empty = disabled).
+    std::vector<uint32_t> _entry_candidates;
 
     // filter support
     uint32_t *_pts_to_label_offsets = nullptr;
