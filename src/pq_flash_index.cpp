@@ -257,6 +257,54 @@ template <typename T, typename LabelT> void PQFlashIndex<T, LabelT>::load_cache_
     diskann::cout << "..done." << std::endl;
 }
 
+// Pre-seed the bounded (dynamic) cache with BFS entry-region nodes. Reads the
+// nodes itself (independent of the separate static cache) and inserts them into
+// _bounded_cache with neighbours + coords, exactly as the search hot-path would.
+template <typename T, typename LabelT>
+void PQFlashIndex<T, LabelT>::seed_bounded_cache_bfs(uint64_t num_seed_nodes)
+{
+    if (!_bounded_cache.enabled() || num_seed_nodes == 0)
+        return;
+
+    std::vector<uint32_t> node_list;
+    cache_bfs_levels(num_seed_nodes, node_list);
+    const size_t n = node_list.size();
+    diskann::cout << "[BNC seed] seeding " << n << " BFS nodes into bounded cache..." << std::flush;
+
+    // Large batch so each read_nodes() coalesces many aligned disk reads (was 8 →
+    // ~7.5M round-trips for 60M nodes; 1024 matches cache_bfs_levels, ~6x faster).
+    const size_t BLOCK_SIZE = 1024;
+    const size_t num_blocks = DIV_ROUND_UP(n, BLOCK_SIZE);
+    for (size_t block = 0; block < num_blocks; block++)
+    {
+        const size_t start_idx = block * BLOCK_SIZE;
+        const size_t end_idx = (std::min)(n, (block + 1) * BLOCK_SIZE);
+
+        std::vector<uint32_t> nodes_to_read;
+        std::vector<T *> coord_buffers;
+        std::vector<std::pair<uint32_t, uint32_t *>> nbr_buffers;
+        std::vector<std::unique_ptr<T[]>> coord_owned;
+        std::vector<std::unique_ptr<uint32_t[]>> nbr_owned;
+        for (size_t i = start_idx; i < end_idx; i++)
+        {
+            nodes_to_read.push_back(node_list[i]);
+            coord_owned.emplace_back(new T[_aligned_dim]);
+            nbr_owned.emplace_back(new uint32_t[_max_degree + 1]);
+            coord_buffers.push_back(coord_owned.back().get());
+            nbr_buffers.emplace_back(0, nbr_owned.back().get());
+        }
+
+        auto read_status = read_nodes(nodes_to_read, coord_buffers, nbr_buffers);
+        for (size_t i = 0; i < read_status.size(); i++)
+        {
+            if (read_status[i])
+                _bounded_cache.insert(nodes_to_read[i], nbr_buffers[i].second, nbr_buffers[i].first,
+                                      coord_buffers[i]);
+        }
+    }
+    diskann::cout << "done." << std::endl;
+}
+
 #ifdef EXEC_ENV_OLS
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::generate_cache_list_from_sample_queries(MemoryMappedFiles &files, std::string sample_bin,
@@ -359,21 +407,26 @@ void PQFlashIndex<T, LabelT>::cache_bfs_levels(uint64_t num_nodes_to_cache, std:
     std::random_device rng;
     std::mt19937 urng(rng());
 
-    // Do not cache more than 10% of the nodes in the index
-    uint64_t tenp_nodes = (uint64_t)(std::round(this->_num_points * 0.1));
+    // Cap at total node count (no artificial 10% limit — let BFS cache fill to budget).
+    uint64_t tenp_nodes = this->_num_points;
     if (num_nodes_to_cache > tenp_nodes)
     {
         diskann::cout << "Reducing nodes to cache from: " << num_nodes_to_cache << " to: " << tenp_nodes
-                      << "(10 percent of total nodes:" << this->_num_points << ")" << std::endl;
+                      << "(total nodes:" << this->_num_points << ")" << std::endl;
         num_nodes_to_cache = tenp_nodes == 0 ? 1 : tenp_nodes;
     }
 
     // Per-medoid BFS: distribute budget evenly so every shard region is represented equally.
     // Each medoid gets budget = N / num_medoids; remainder goes to the last medoid.
     // global_seen is shared across all BFS runs to prevent double-counting overlapping regions.
-    uint64_t n_entries = _num_medoids > 0 ? _num_medoids : 1;
-    uint64_t budget_each = num_nodes_to_cache / n_entries;
-    uint64_t budget_last = num_nodes_to_cache - budget_each * (n_entries - 1);
+    // Single-medoid BFS (DiskANN-style): the full budget is taken from one entry
+    // point. The multi-medoid variant is disabled: for clustered medoids (e.g.
+    // spacev's 5 near-co-located medoids) it gave no extra coverage AND skipped
+    // "already claimed" medoids via the shared global_seen, loading only ~1/N of
+    // num_nodes_to_cache. Single medoid loads the full requested budget.
+    uint64_t n_entries = 1;
+    uint64_t budget_each = num_nodes_to_cache;
+    uint64_t budget_last = num_nodes_to_cache;
 
     diskann::cout << "Caching " << num_nodes_to_cache << " nodes across " << n_entries
                   << " medoid(s) (budget_per_medoid=" << budget_each << ")" << std::endl;
@@ -1480,8 +1533,24 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  const uint32_t et_sat_delta, const float et_theta_exact,
                                                  const uint32_t et_conv_delta,
                                                  const bool use_reorder_data,
-                                                 QueryStats *stats, const uint32_t *oracle_gt_ids)
+                                                 QueryStats *stats, const uint32_t *oracle_gt_ids,
+                                                 const uint32_t et_ref_rank, const uint32_t et_min_hops,
+                                                 const uint32_t et_conv_width, std::vector<float> *feat_log,
+                                                 const uint32_t self_exclude_id, const float et_verify_alpha,
+                                                 const uint32_t et_verify_patience, const bool et_exact_led,
+                                                 const uint32_t et_exact_patience, const float et_exact_beta)
 {
+    // Predict-then-verify ET: θ-ET (PQ) is layer-1 predictor; this hop's minimum
+    // EXACT distance vs the conv_width-th best EXACT distance is layer-2 verifier.
+    const bool et_verify_on = (et_verify_alpha < std::numeric_limits<float>::max());
+
+    // Patience convergence window AND layer-2 verify reference rank.
+    //   conv_topk holds the conv_width smallest EXACT distances seen so far;
+    //   conv_topk.top() is the conv_width-th best. Widening conv_width (e.g. 40)
+    //   moves the verify reference to a farther rank → larger stop threshold →
+    //   more conservative ET → higher recall. Decoupled from k_search (recall@k):
+    //   measure recall@10 while letting ET watch top-40. Default = k_search.
+    const uint32_t conv_width = (et_conv_width > 0) ? et_conv_width : (uint32_t)k_search;
 
     uint64_t num_sector_per_nodes = DIV_ROUND_UP(_max_node_len, defaults::SECTOR_LEN);
     if (beam_width > num_sector_per_nodes * defaults::MAX_N_SECTOR_READS)
@@ -1636,6 +1705,15 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     uint32_t hops = 0;
     uint32_t num_ios = 0;
 
+    // For feature-dump (learned-ET): track previous-hop top-k / top-40 id sets to
+    // detect membership churn. Only used when feat_log != nullptr.
+    std::vector<uint32_t> feat_prev_topk, feat_prev_top40;
+    // Running PQ-vs-exact residual stats over all expanded nodes (group B features).
+    std::vector<std::pair<uint32_t, float>> beam_pq; // id -> PQ dist for current beam
+    double pq_resid_sum = 0.0, pq_resid_sqsum = 0.0;
+    float pq_resid_max = 0.0f;
+    uint64_t pq_resid_n = 0;
+
     // Nodes for which we already hold the exact L2 distance (computed from
     // the disk sector during the search phase).  These can be skipped in the
     // Phase-3 re-rank to avoid redundant disk reads at high concurrency.
@@ -1652,6 +1730,28 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     uint32_t et_conv_streak = 0;
     bool hop_topk_changed = false;
 
+    // Predict-then-verify ET state (reset every hop).
+    //   theta_pred_stop : layer-1 θ-ET (PQ) flagged "stop" this hop.
+    //   hop_min_exact   : min EXACT distance among nodes expanded THIS hop
+    //                     (PQ-fallback nodes excluded — strict exact-vs-exact at layer-2).
+    float hop_min_exact = std::numeric_limits<float>::max();
+    bool theta_pred_stop = false;
+    // Patience: both layers must agree for this many CONSECUTIVE hops before we
+    // actually stop. Any hop that fails to fire (θ-ET silent OR exact veto) resets it.
+    uint32_t verify_streak = 0;
+
+    // Dual-rail same-scale ET (new primary ET): consecutive-hop patience counter for
+    // the joint (PQ-divergence AND exact-convergence) gate. Reset on any non-firing hop.
+    uint32_t exact_streak = 0;
+    // Global best (smallest) EXACT distance over all hops so far (the 1st-place exact),
+    // used as the convergence anchor by the exact rail. Updated at each hop's end.
+    float global_best_exact = std::numeric_limits<float>::max();
+
+    // Exact-led mode: carry the PREVIOUS hop's min exact distance (persists across
+    // hops, NOT reset each hop). Lets the hop-top gate use already-paid-for exact
+    // info to decide BEFORE issuing this hop's beam (no verify-beam cost).
+    float prev_hop_min_exact = std::numeric_limits<float>::max();
+
     // cleared every iteration
     std::vector<uint32_t> frontier;
     frontier.reserve(2 * beam_width);
@@ -1664,27 +1764,103 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 
     while (retset.has_unexpanded_node() && num_ios < io_limit)
     {
-        // θ-ET: stop when the closest unexpanded candidate is θ× farther than the current k-th best.
-        // Query-adaptive: tight-cluster queries converge fast and fire ET early;
-        // hard queries keep kth_pq high longer, granting more hops automatically.
-        if (et_theta < std::numeric_limits<float>::max() && retset.size() >= k_search)
+        // Reset predict-then-verify per-hop state before any gate runs.
+        hop_min_exact = std::numeric_limits<float>::max();
+        theta_pred_stop = false;
+
+        // ── Exact-led ET (hop top, decides BEFORE issuing this hop's beam) ─────────
+        // Inverts predict-then-verify: lead with the FREE & reliable exact signal
+        // (previous hop found nothing within α of the k-th best exact), then confirm
+        // with the PQ look-ahead (immediate frontier also θ× far). Both must hold for
+        // `patience` consecutive hops. Uses prev_hop_min_exact → no verify-beam cost,
+        // and requires OBSERVED exact non-improvement → more recall-safe (good for
+        // truncation-sensitive datasets like deep100m).
+        if (et_verify_on && et_exact_led)
         {
-            const float best_unexp_pq = retset.peek_unexpanded_dist();
-            const float kth_pq = retset[k_search - 1].distance;
-            if (kth_pq > 1e-9f && best_unexp_pq > kth_pq * et_theta)
-                break;
+            bool fired = false;
+            if (hops >= et_min_hops && prev_hop_min_exact < std::numeric_limits<float>::max() &&
+                (uint32_t)conv_topk.size() >= conv_width)
+            {
+                const float kth_exact = conv_topk.top().first;
+                if (kth_exact > 1e-9f && prev_hop_min_exact > kth_exact * et_verify_alpha)
+                {
+                    // exact gate held → PQ look-ahead on the immediate frontier
+                    const uint32_t rr = (et_ref_rank > 0) ? et_ref_rank : (uint32_t)k_search;
+                    if (et_theta < std::numeric_limits<float>::max() && retset.size() >= rr)
+                    {
+                        const float best_unexp_pq = retset.peek_unexpanded_dist();
+                        const float ref_pq = retset[rr - 1].distance;
+                        if (ref_pq > 1e-9f && best_unexp_pq > ref_pq * et_theta)
+                            fired = true;
+                    }
+                }
+            }
+            if (fired)
+            {
+                if (++verify_streak >= std::max(1u, et_verify_patience))
+                    break; // stop before issuing this hop's beam
+            }
+            else
+                verify_streak = 0;
         }
 
-        // Exact-kth ET: compare best unexpanded PQ distance against the K-th EXACT distance
-        // tracked by conv_topk (max-heap, O(1) access).  conv_topk is maintained jointly with
-        // et_conv_delta so no extra overhead when both are enabled.
-        // Guaranteed ET: kth_exact is a true distance, so false-trigger rate is near zero.
-        if (et_theta_exact < std::numeric_limits<float>::max() && conv_topk.size() >= k_search)
+        // θ-ET with configurable reference rank (et_ref_rank).
+        //   ref_rank = 0 → defaults to k_search (classic: compare vs k-th best).
+        //   ref_rank > k → widen the "attention window" toward L; ET becomes more
+        //     conservative (stop only when the closest unexpanded node is θ× farther
+        //     than the ref_rank-th candidate). With θ=1 this means "all of the top
+        //     ref_rank candidates are already expanded".
+        // Decouples the search-pool width (L) from the termination depth (ref_rank).
+        // et_min_hops: grace period. ET only activates AFTER a query has run this
+        // many hops, so the bulk of queries (which converge within the profiled
+        // P50/P75 hop count) run untouched and keep full recall; only the long-
+        // running tail queries become subject to ET, capping P99. 0 = no grace.
+        if (!et_exact_led && et_theta < std::numeric_limits<float>::max() && hops >= et_min_hops)
+        {
+            const uint32_t rr = (et_ref_rank > 0) ? et_ref_rank : (uint32_t)k_search;
+            if (retset.size() >= rr)
+            {
+                const float best_unexp_pq = retset.peek_unexpanded_dist();
+                const float ref_pq = retset[rr - 1].distance;
+                if (ref_pq > 1e-9f && best_unexp_pq > ref_pq * et_theta)
+                {
+                    if (!et_verify_on)
+                        break; // classic θ-ET: PQ predictor stops immediately.
+                    else
+                        // Predict-then-verify: defer. Grant this hop so the layer-2
+                        // exact verifier (hop bottom) can confirm or veto the stop.
+                        theta_pred_stop = true;
+                }
+            }
+        }
+
+        // ── Cross-scale exact ET (primary mechanism) ─────────────────────────────
+        // Before issuing this hop's SSD I/O, a single cross-scale check:
+        //   D_pq_cand  = best UNexpanded node's PQ distance (predicted, not yet read)
+        //   D_exact_k2 = conv_width-th (= k×2) best EXACT distance held in the candidate
+        //                list from prior hops (conv_topk.top()).
+        //   gate (γ = et_theta_exact): D_pq_cand > D_exact_k2 × γ
+        // PQ underestimates true distance, so using the EXACT k×2-th as the reliable
+        // per-hop anchor and requiring the next PQ candidate to exceed it by γ is a
+        // conservative "this hop won't improve recall" signal — and the exact anchor is
+        // checked PER HOP against the actual next candidate (this per-hop exact anchor is
+        // what makes it stronger than a same-scale convergence threshold). On trigger we
+        // bump a patience counter; only after et_exact_patience CONSECUTIVE triggering
+        // hops do we stop — BEFORE issuing this hop's I/O. Any non-firing hop resets it.
+        // conv_width (et_conv_width, set to k×2) decouples the ET reference rank from k.
+        // (et_exact_beta is reserved/unused in this mechanism.)
+        if (et_theta_exact < std::numeric_limits<float>::max() && hops >= et_min_hops &&
+            (uint32_t)conv_topk.size() >= conv_width)
         {
             const float best_unexp_pq = retset.peek_unexpanded_dist();
-            const float kth_exact = conv_topk.top().first; // O(1): max-heap top = k-th best exact dist
-            if (kth_exact > 1e-9f && best_unexp_pq > kth_exact * et_theta_exact)
-                break;
+            const float d_exact_k2 = conv_topk.top().first; // conv_width-th (=k×2) best EXACT
+            if (d_exact_k2 > 1e-9f && best_unexp_pq > d_exact_k2 * et_theta_exact)
+            {
+                if (++exact_streak >= std::max(1u, et_exact_patience))
+                    break; // stop before issuing this hop's SSD I/O
+            }
+            else
+                exact_streak = 0;
         }
 
         if (hops >= hop_budget)
@@ -1699,12 +1875,14 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         cached_nhoods.clear();
         sector_scratch_idx = 0;
         hop_topk_changed = false;
+        beam_pq.clear();
         // find new beam
         uint32_t num_seen = 0;
         while (retset.has_unexpanded_node() && frontier.size() < beam_width && num_seen < beam_width)
         {
             auto nbr = retset.closest_unexpanded();
             num_seen++;
+            if (feat_log != nullptr) beam_pq.push_back({nbr.id, nbr.distance}); // PQ dist for residual
             auto iter = _nhood_cache.find(nbr.id);
             if (iter != _nhood_cache.end())
             {
@@ -1787,6 +1965,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             auto global_cache_iter = _coord_cache.find(cached_nhood.first);
             uint32_t node_id = (uint32_t)cached_nhood.first;
             float cur_expanded_dist;
+            bool cur_is_exact = false; // true iff cur_expanded_dist is a true exact L2/IP dist
             if (global_cache_iter != _coord_cache.end())
             {
                 // Coords available in _coord_cache (Phase-1 BFS preload).
@@ -1807,6 +1986,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                         cur_expanded_dist = _disk_pq_table.l2_distance(
                             query_float, (uint8_t *)node_fp_coords_copy);
                 }
+                cur_is_exact = true; // Phase-1 coord_cache → exact distance
                 if (_bounded_cache.enabled())
                     exact_dist_nodes.insert(node_id);
             }
@@ -1823,22 +2003,36 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     cur_expanded_dist = (metric == diskann::Metric::INNER_PRODUCT)
                                             ? _disk_pq_table.inner_product(query_float, (uint8_t *)data_buf)
                                             : _disk_pq_table.l2_distance(query_float, (uint8_t *)data_buf);
+                cur_is_exact = true; // BNC-stored coords → exact distance
                 exact_dist_nodes.insert(node_id);
             }
             else
             {
                 // Fallback: no exact coords available (nhood_cache hit without coords).
-                // Use PQ distance.
+                // Use PQ distance. cur_is_exact stays false → excluded from layer-2 verify
+                // and from conv_topk (which must hold exact distances only).
                 compute_dists(&node_id, 1, dist_scratch);
                 cur_expanded_dist = dist_scratch[0];
             }
             full_retset.push_back(Neighbor(node_id, cur_expanded_dist));
-            if (et_conv_delta > 0 || et_theta_exact < std::numeric_limits<float>::max())
+            if (feat_log != nullptr)
+                for (auto &bp : beam_pq)
+                    if (bp.first == node_id)
+                    { float rr = bp.second - cur_expanded_dist; pq_resid_sum += rr;
+                      pq_resid_sqsum += (double)rr * rr; if (rr > pq_resid_max) pq_resid_max = rr;
+                      pq_resid_n++; break; }
+            // Layer-2 verifier accumulator + exact-only conv_topk maintenance.
+            if (cur_is_exact)
             {
-                if ((uint32_t)conv_topk.size() < k_search)
-                { conv_topk.push({cur_expanded_dist, node_id}); hop_topk_changed = true; }
-                else if (cur_expanded_dist < conv_topk.top().first)
-                { conv_topk.pop(); conv_topk.push({cur_expanded_dist, node_id}); hop_topk_changed = true; }
+                if (cur_expanded_dist < hop_min_exact)
+                    hop_min_exact = cur_expanded_dist;
+                if (et_conv_delta > 0 || et_theta_exact < std::numeric_limits<float>::max() || et_verify_on)
+                {
+                    if ((uint32_t)conv_topk.size() < conv_width)
+                    { conv_topk.push({cur_expanded_dist, node_id}); hop_topk_changed = true; }
+                    else if (cur_expanded_dist < conv_topk.top().first)
+                    { conv_topk.pop(); conv_topk.push({cur_expanded_dist, node_id}); hop_topk_changed = true; }
+                }
             }
 
             uint64_t nnbrs = cached_nhood.second.first;
@@ -1916,10 +2110,19 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     cur_expanded_dist = _disk_pq_table.l2_distance(query_float, (uint8_t *)data_buf);
             }
             exact_dist_nodes.insert(static_cast<uint32_t>(frontier_nhood.first));
+            // Frontier (disk-read) nodes are always exact → feed layer-2 verifier.
+            if (cur_expanded_dist < hop_min_exact)
+                hop_min_exact = cur_expanded_dist;
             full_retset.push_back(Neighbor(frontier_nhood.first, cur_expanded_dist));
-            if (et_conv_delta > 0 || et_theta_exact < std::numeric_limits<float>::max())
+            if (feat_log != nullptr)
+                for (auto &bp : beam_pq)
+                    if (bp.first == (uint32_t)frontier_nhood.first)
+                    { float rr = bp.second - cur_expanded_dist; pq_resid_sum += rr;
+                      pq_resid_sqsum += (double)rr * rr; if (rr > pq_resid_max) pq_resid_max = rr;
+                      pq_resid_n++; break; }
+            if (et_conv_delta > 0 || et_theta_exact < std::numeric_limits<float>::max() || et_verify_on)
             {
-                if ((uint32_t)conv_topk.size() < k_search)
+                if ((uint32_t)conv_topk.size() < conv_width)
                 { conv_topk.push({cur_expanded_dist, (uint32_t)frontier_nhood.first}); hop_topk_changed = true; }
                 else if (cur_expanded_dist < conv_topk.top().first)
                 { conv_topk.pop(); conv_topk.push({cur_expanded_dist, (uint32_t)frontier_nhood.first}); hop_topk_changed = true; }
@@ -1962,6 +2165,40 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             if (stats != nullptr)
             {
                 stats->cpu_us += (float)cpu_timer.elapsed();
+            }
+        }
+
+        // ── Predict-then-verify ET, layer-2 (exact) ──────────────────────────────
+        // Fires only when layer-1 θ-ET (PQ) flagged stop THIS hop (theta_pred_stop).
+        // Confirmation is strict exact-vs-exact: the closest node expanded this hop
+        // (hop_min_exact) must still be α× beyond the k-th best EXACT distance
+        // (conv_topk.top()). If so, divergence is real → stop. Otherwise θ-ET was a
+        // PQ false-trigger and the search continues, preserving recall on hard queries.
+        // Guards: kth_exact valid (conv_topk has ≥ k exact entries), hop produced an
+        // exact node (hop_min_exact < FLT_MAX), grace period satisfied.
+        if (et_verify_on && !et_exact_led && hops >= et_min_hops)
+        {
+            bool fired_this_hop = false;
+            if (theta_pred_stop && (uint32_t)conv_topk.size() >= conv_width &&
+                hop_min_exact < std::numeric_limits<float>::max())
+            {
+                const float kth_exact = conv_topk.top().first; // O(1): max-heap top = conv_width-th best exact
+                if (kth_exact > 1e-9f && hop_min_exact > kth_exact * et_verify_alpha)
+                    fired_this_hop = true;
+            }
+
+            if (fired_this_hop)
+            {
+                // Patience ≥ 1: require this many consecutive agreeing hops to stop.
+                if (++verify_streak >= std::max(1u, et_verify_patience))
+                {
+                    hops++;
+                    break;
+                }
+            }
+            else
+            {
+                verify_streak = 0; // non-consecutive → reset
             }
         }
 
@@ -2014,7 +2251,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         // Exact Convergence ET: terminate if full_retset top-K (by exact distance) unchanged for
         // et_conv_delta consecutive hops. Unlike Saturation ET, this monitors the actual output
         // structure (full_retset) not the PQ-ordered traversal queue (retset).
-        if (et_conv_delta > 0 && (uint32_t)conv_topk.size() >= k_search)
+        if (et_conv_delta > 0 && (uint32_t)conv_topk.size() >= conv_width)
         {
             if (hop_topk_changed)
                 et_conv_streak = 0;
@@ -2029,20 +2266,79 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         // full_retset holds all expanded nodes with their exact distances (SSD-read or BNC-resolved).
         // This is the true earliest-stop oracle: the search could return the same final result here.
         // O(N log N) per hop for the sort — analysis-only, never used in production.
-        if (oracle_gt_ids != nullptr && stats != nullptr && stats->oracle_hops == 0 &&
-            full_retset.size() >= k_search)
+        if (oracle_gt_ids != nullptr && stats != nullptr && full_retset.size() >= k_search &&
+            (feat_log != nullptr || stats->oracle_hops == 0))
         {
             // Sort a copy to find top-K by exact distance.
-            std::vector<Neighbor> sorted_frt = full_retset;
-            std::sort(sorted_frt.begin(), sorted_frt.end());
+            std::vector<Neighbor> sorted_all = full_retset;
+            std::sort(sorted_all.begin(), sorted_all.end());
+            // Leave-one-out: drop the query's own node (base-vector-as-query self-match).
+            std::vector<Neighbor> sorted_frt;
+            sorted_frt.reserve(sorted_all.size());
+            for (auto &nb : sorted_all)
+                if (nb.id != self_exclude_id) sorted_frt.push_back(nb);
+          if (sorted_frt.size() >= k_search)
+          {
             uint32_t found = 0;
             for (uint64_t g = 0; g < k_search; g++)
                 for (uint64_t r = 0; r < k_search; r++)
                     if (sorted_frt[r].id == oracle_gt_ids[g]) { found++; break; }
-            if (found == k_search)
+            if (found == k_search && stats->oracle_hops == 0)
                 stats->oracle_hops = hops + 1;
+
+            // Per-hop raw feature dump for the learned-ET predictor (analysis only).
+            // 14 raw values; engineered features (ratios/derivatives/windows) derived offline.
+            if (feat_log != nullptr)
+            {
+                const uint32_t sz = (uint32_t)sorted_frt.size();
+                const uint32_t m = std::min<uint32_t>(40, sz);
+                const float dk_exact = sorted_frt[k_search - 1].distance;
+                // threat scan over retset: unexpanded entries whose PQ dist could beat k-th exact
+                uint32_t n_threats = 0, n_unexp = 0, n_expanded = 0;
+                for (uint32_t r = 0; r < (uint32_t)retset.size(); r++)
+                {
+                    if (retset[r].expanded) { n_expanded++; }
+                    else { n_unexp++; if (retset[r].distance < dk_exact) n_threats++; }
+                }
+                // top-k / top-40 id-set churn vs previous hop
+                std::vector<uint32_t> cur_topk(k_search), cur_top40(m);
+                for (uint32_t r = 0; r < (uint32_t)k_search; r++) cur_topk[r] = sorted_frt[r].id;
+                for (uint32_t r = 0; r < m; r++) cur_top40[r] = sorted_frt[r].id;
+                std::vector<uint32_t> sk = cur_topk, s40 = cur_top40;
+                std::sort(sk.begin(), sk.end()); std::sort(s40.begin(), s40.end());
+                float topk_changed = (sk != feat_prev_topk) ? 1.0f : 0.0f;
+                float top40_changed = (s40 != feat_prev_top40) ? 1.0f : 0.0f;
+                feat_prev_topk = sk; feat_prev_top40 = s40;
+
+                feat_log->push_back((float)hops);                                   // 0 hop
+                feat_log->push_back(sorted_frt[0].distance);                        // 1 d1 exact
+                feat_log->push_back(dk_exact);                                      // 2 dk exact
+                feat_log->push_back(sz > k_search ? sorted_frt[k_search].distance : dk_exact);        // 3 d(k+1)
+                feat_log->push_back(sz >= 2*k_search ? sorted_frt[2*k_search-1].distance : dk_exact); // 4 d(2k)
+                feat_log->push_back(sorted_frt[m - 1].distance);                    // 5 d40 exact
+                feat_log->push_back(retset[k_search - 1].distance);                 // 6 dk pq
+                feat_log->push_back(retset.peek_unexpanded_dist());                 // 7 best unexp pq
+                feat_log->push_back((float)n_threats);                             // 8 #threats (unexp pq<dk_exact)
+                feat_log->push_back((float)n_unexp);                              // 9 #unexpanded
+                feat_log->push_back((float)n_expanded);                          // 10 #expanded
+                feat_log->push_back(topk_changed);                              // 11 top-k id churn flag
+                feat_log->push_back(top40_changed);                            // 12 top-40 id churn flag
+                // group B: PQ-vs-exact residual stats over all expanded nodes so far
+                const double rmean = pq_resid_n ? pq_resid_sum / pq_resid_n : 0.0;
+                const double rvar = pq_resid_n ? std::max(0.0, pq_resid_sqsum / pq_resid_n - rmean * rmean) : 0.0;
+                feat_log->push_back((float)rmean);                            // 13 PQ residual mean
+                feat_log->push_back((float)std::sqrt(rvar));                  // 14 PQ residual std
+                feat_log->push_back(pq_resid_max);                           // 15 PQ residual max
+                feat_log->push_back((float)found);                          // 16 found (label src)
+            }
+          }
         }
 
+        // Carry this hop's min exact to the next hop's exact-led gate (no reset).
+        prev_hop_min_exact = hop_min_exact;
+        // Update the global best (1st-place) exact distance — the exact rail's anchor.
+        if (hop_min_exact < global_best_exact)
+            global_best_exact = hop_min_exact;
         hops++;
     }
 
@@ -2207,10 +2503,13 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         std::sort(full_retset.begin(), full_retset.end());
     }
 
-    // copy k_search values
-    for (uint64_t i = 0; i < k_search; i++)
+    // copy k_search values. Leave-one-out: skip the query's own node (self-match)
+    // so base-vector-as-query results match a real out-of-sample query.
+    for (uint64_t i = 0, si = 0; i < k_search; i++, si++)
     {
-        indices[i] = full_retset[i].id;
+        while (si < full_retset.size() && full_retset[si].id == self_exclude_id) si++;
+        if (si >= full_retset.size()) break;
+        indices[i] = full_retset[si].id;
         auto key = (uint32_t)indices[i];
         if (_dummy_pts.find(key) != _dummy_pts.end())
         {
@@ -2219,7 +2518,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 
         if (distances != nullptr)
         {
-            distances[i] = full_retset[i].distance;
+            distances[i] = full_retset[si].distance;
             if (metric == diskann::Metric::INNER_PRODUCT)
             {
                 // flip the sign to convert min to max

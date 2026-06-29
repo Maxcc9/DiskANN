@@ -102,7 +102,17 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
                                               const uint32_t et_conv_delta = 0,
                                               const bool use_reorder_data = false,
                                               QueryStats *stats = nullptr,
-                                              const uint32_t *oracle_gt_ids = nullptr);
+                                              const uint32_t *oracle_gt_ids = nullptr,
+                                              const uint32_t et_ref_rank = 0,
+                                              const uint32_t et_min_hops = 0,
+                                              const uint32_t et_conv_width = 0,
+                                              std::vector<float> *feat_log = nullptr,
+                                              const uint32_t self_exclude_id = std::numeric_limits<uint32_t>::max(),
+                                              const float et_verify_alpha = std::numeric_limits<float>::max(),
+                                              const uint32_t et_verify_patience = 1,
+                                              const bool et_exact_led = false,
+                                              const uint32_t et_exact_patience = 1,
+                                              const float et_exact_beta = std::numeric_limits<float>::max());
 
     DISKANN_DLLEXPORT LabelT get_converted_label(const std::string &filter_label);
 
@@ -161,6 +171,12 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
     // bounded by capacity_bytes.  Nodes are inserted lazily on disk-read.
     // Must be called after load() / load_from_separate_paths().
     DISKANN_DLLEXPORT void init_bounded_neighbor_cache(size_t capacity_bytes);
+
+    // Pre-seed the bounded (dynamic) cache with the BFS entry-region nodes at
+    // startup. Unlike a separate static cache, seeded nodes are ordinary BNC
+    // entries: hot ones (entry region) stay via CLOCK, cold ones get evicted and
+    // replaced by query-hot nodes. One unified adaptive pool, warm-started.
+    DISKANN_DLLEXPORT void seed_bounded_cache_bfs(uint64_t num_seed_nodes);
 
   protected:
     DISKANN_DLLEXPORT void use_medoids_data_as_centroids();

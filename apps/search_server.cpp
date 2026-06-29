@@ -129,9 +129,21 @@ template <typename T> class SearchServer
                  const float et_sat_gamma, const uint32_t et_sat_delta,
                  const bool enable_neighbor_cache, const double neighbor_cache_gb,
                  const float qd_alpha, const uint32_t io_concurrency,
-                 const std::string &entry_candidates_file = "")
+                 const std::string &entry_candidates_file = "",
+                 const uint32_t hop_budget_cap = 0, const uint32_t et_ref_rank = 0,
+                 const uint32_t et_conv_delta = 0, const uint32_t et_conv_width = 0,
+                 const uint32_t et_min_hops = 0,
+                 const float et_verify_alpha = std::numeric_limits<float>::max(),
+                 const uint32_t et_verify_patience = 1,
+                 const uint32_t bnc_seed_nodes = 0,
+                 const float et_theta_exact = std::numeric_limits<float>::max(),
+                 const uint32_t et_exact_patience = 1)
         : _beamwidth(beamwidth), _et_sat_gamma(et_sat_gamma), _et_sat_delta(et_sat_delta),
-          _qd_alpha(qd_alpha), _io_concurrency(io_concurrency)
+          _qd_alpha(qd_alpha), _io_concurrency(io_concurrency),
+          _hop_budget_cap(hop_budget_cap), _et_ref_rank(et_ref_rank), _et_conv_delta(et_conv_delta),
+          _et_conv_width(et_conv_width), _et_min_hops(et_min_hops), _et_verify_alpha(et_verify_alpha),
+          _et_verify_patience(et_verify_patience), _bnc_seed_nodes(bnc_seed_nodes),
+          _et_theta_exact(et_theta_exact), _et_exact_patience(et_exact_patience)
     {
 #ifdef _WINDOWS
         static_assert(false, "search_server is currently implemented for POSIX platforms only.");
@@ -157,6 +169,8 @@ template <typename T> class SearchServer
             const size_t capacity_bytes =
                 static_cast<size_t>(neighbor_cache_gb * 1024.0 * 1024.0 * 1024.0);
             _index->init_bounded_neighbor_cache(capacity_bytes);
+            if (_bnc_seed_nodes > 0)
+                _index->seed_bounded_cache_bfs(_bnc_seed_nodes); // warm-start BNC with BFS entry region
         }
         else if (enable_neighbor_cache)
         {
@@ -387,10 +401,8 @@ template <typename T> class SearchServer
             theta *= (1.0f + _qd_alpha * load_ratio);
         }
 
-        // hop_budget = L: each query runs at most L outer search iterations.
-        // Cache-hit iterations skip SSD reads, so cache-heavy queries explore
-        // more neighbours for the same iteration budget (implicit cache-guided ET).
-        const uint32_t hop_budget = request.l;
+        // hop_budget: independent cap if set, else = L (each query at most L iterations).
+        const uint32_t hop_budget = (_hop_budget_cap > 0) ? _hop_budget_cap : request.l;
 
         _active_searches.fetch_add(1, std::memory_order_relaxed);
 
@@ -405,9 +417,15 @@ template <typename T> class SearchServer
                                     _active_searches.load(std::memory_order_relaxed)))))
             : _beamwidth;
 
+        // Full overload: thread the non-learned ET knobs (ref_rank / patience / grace).
         _index->cached_beam_search(query.data(), request.k, request.l, result_ids.data(), result_dists.data(),
-                                   eff_bw, theta, hop_budget,
-                                   _et_sat_gamma, _et_sat_delta);
+                                   eff_bw, false, (uint32_t)0, std::numeric_limits<uint32_t>::max(),
+                                   theta, hop_budget, _et_sat_gamma, _et_sat_delta,
+                                   _et_theta_exact, _et_conv_delta,
+                                   false, nullptr, nullptr,
+                                   _et_ref_rank, _et_min_hops, _et_conv_width,
+                                   nullptr, std::numeric_limits<uint32_t>::max(), _et_verify_alpha,
+                                   _et_verify_patience, false, _et_exact_patience);
         _active_searches.fetch_sub(1, std::memory_order_relaxed);
 
         const auto end = std::chrono::steady_clock::now();
@@ -441,6 +459,17 @@ template <typename T> class SearchServer
     float    _qd_alpha = 0.0f;       // queue-depth adaptive theta coefficient (0 = disabled)
     uint32_t _io_concurrency = 0;    // target concurrent in-flight SSD reads (0 = disabled)
     uint32_t _num_threads = 1;
+    // Non-learned ET knobs (0 = use default/disabled). Fixed per server launch.
+    uint32_t _hop_budget_cap = 0;    // independent hop cap (0 → hop_budget = L)
+    uint32_t _et_ref_rank = 0;       // θ-ET reference rank (0 → k)
+    uint32_t _et_conv_delta = 0;     // patience: top-M stable for δ hops
+    uint32_t _et_conv_width = 0;     // patience window M (0 → k)
+    uint32_t _et_min_hops = 0;       // ET grace period
+    float    _et_verify_alpha = std::numeric_limits<float>::max(); // predict-then-verify layer-2 α (max = disabled)
+    uint32_t _et_verify_patience = 1; // consecutive agreeing hops required to stop (1 = first trigger)
+    float    _et_theta_exact = std::numeric_limits<float>::max(); // hybrid-exact ET γ (max = disabled)
+    uint32_t _et_exact_patience = 1;  // hybrid-exact ET patience (consecutive triggering hops)
+    uint32_t _bnc_seed_nodes = 0;     // warm-start BNC with this many BFS entry-region nodes (0 = off)
 
     std::atomic<int32_t> _active_searches{0};  // requests currently inside cached_beam_search
 
@@ -456,11 +485,19 @@ int run_search_server(const std::string &index_path_prefix, const diskann::Metri
                       const float et_sat_gamma, const uint32_t et_sat_delta, const uint16_t port,
                       const bool enable_neighbor_cache, const double neighbor_cache_gb,
                       const float qd_alpha, const uint32_t io_concurrency,
-                      const std::string &entry_candidates_file)
+                      const std::string &entry_candidates_file,
+                      const uint32_t hop_budget_cap, const uint32_t et_ref_rank,
+                      const uint32_t et_conv_delta, const uint32_t et_conv_width, const uint32_t et_min_hops,
+                      const float et_verify_alpha, const uint32_t et_verify_patience,
+                      const uint32_t bnc_seed_nodes,
+                      const float et_theta_exact, const uint32_t et_exact_patience)
 {
     SearchServer<T> server(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                             et_sat_gamma, et_sat_delta, enable_neighbor_cache, neighbor_cache_gb,
-                            qd_alpha, io_concurrency, entry_candidates_file);
+                            qd_alpha, io_concurrency, entry_candidates_file,
+                            hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
+                            et_verify_alpha, et_verify_patience, bnc_seed_nodes,
+                            et_theta_exact, et_exact_patience);
     server.serve(port, num_threads);
     return 0;
 }
@@ -483,6 +520,12 @@ int main(int argc, char **argv)
     float    qd_alpha = 0.0f;
     uint32_t io_concurrency = 0;
     std::string entry_candidates_file;
+    uint32_t hop_budget_cap = 0, et_ref_rank = 0, et_conv_delta = 0, et_conv_width = 0, et_min_hops = 0;
+    float et_verify_alpha = std::numeric_limits<float>::max();
+    uint32_t et_verify_patience = 1;
+    uint32_t bnc_seed_nodes = 0;
+    float et_theta_exact = std::numeric_limits<float>::max();
+    uint32_t et_exact_patience = 1;
 
     po::options_description desc{"Arguments"};
     try
@@ -528,6 +571,35 @@ int main(int argc, char **argv)
                            po::value<std::string>(&entry_candidates_file)->default_value(""),
                            "T4 query-adaptive entry router: file of candidate entry node ids "
                            "(uint32 count + ids). Each query starts from the nearest candidate.");
+        desc.add_options()("hop_budget", po::value<uint32_t>(&hop_budget_cap)->default_value(0),
+                           "Independent per-query hop cap (deadline ET). 0 = use L.");
+        desc.add_options()("et_ref_rank", po::value<uint32_t>(&et_ref_rank)->default_value(0),
+                           "θ-ET reference rank (0 = k).");
+        desc.add_options()("et_conv_delta", po::value<uint32_t>(&et_conv_delta)->default_value(0),
+                           "Patience ET: stop when exact top-M stable for δ hops (0 = off).");
+        desc.add_options()("et_conv_width", po::value<uint32_t>(&et_conv_width)->default_value(0),
+                           "Patience window M (0 = k).");
+        desc.add_options()("et_min_hops", po::value<uint32_t>(&et_min_hops)->default_value(0),
+                           "ET grace period (hops before ET activates).");
+        desc.add_options()("et_verify_alpha",
+                           po::value<float>(&et_verify_alpha)->default_value(std::numeric_limits<float>::max()),
+                           "Predict-then-verify ET: layer-2 exact α (FLT_MAX = disabled). When set, θ-ET (et_theta) "
+                           "acts as a PQ predictor and only stops if min(this-hop exact) > kth_exact * alpha.");
+        desc.add_options()("et_verify_patience",
+                           po::value<uint32_t>(&et_verify_patience)->default_value(1),
+                           "Predict-then-verify ET: consecutive hops where both layers agree before stopping "
+                           "(1 = stop on first trigger).");
+        desc.add_options()("bnc_seed_nodes",
+                           po::value<uint32_t>(&bnc_seed_nodes)->default_value(0),
+                           "Warm-start the dynamic BNC with this many BFS entry-region nodes at startup "
+                           "(0 = off). Seeded nodes are ordinary BNC entries (evicted if they go cold).");
+        desc.add_options()("et_theta_exact",
+                           po::value<float>(&et_theta_exact)->default_value(std::numeric_limits<float>::max()),
+                           "Hybrid-exact ET safety factor gamma (FLT_MAX = disabled). Stop (before issuing I/O) when "
+                           "best-unexpanded PQ dist > (k2-th EXACT dist) * gamma. Use et_conv_width=2k for the k2-th rank.");
+        desc.add_options()("et_exact_patience",
+                           po::value<uint32_t>(&et_exact_patience)->default_value(1),
+                           "Hybrid-exact ET patience: consecutive triggering hops required before stopping (1 = first trigger).");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -565,19 +637,28 @@ int main(int argc, char **argv)
         {
             return run_search_server<float>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                                             et_sat_gamma, et_sat_delta, port,
-                                            enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file);
+                                            enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file,
+                                            hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
+                                            et_verify_alpha, et_verify_patience, bnc_seed_nodes,
+                                            et_theta_exact, et_exact_patience);
         }
         if (data_type == "int8")
         {
             return run_search_server<int8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                                              et_sat_gamma, et_sat_delta, port,
-                                             enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file);
+                                             enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file,
+                                            hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
+                                            et_verify_alpha, et_verify_patience, bnc_seed_nodes,
+                                            et_theta_exact, et_exact_patience);
         }
         if (data_type == "uint8")
         {
             return run_search_server<uint8_t>(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                                               et_sat_gamma, et_sat_delta, port,
-                                              enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file);
+                                              enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file,
+                                            hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
+                                            et_verify_alpha, et_verify_patience, bnc_seed_nodes,
+                                            et_theta_exact, et_exact_patience);
         }
 
         std::cerr << "Unsupported data type " << data_type << std::endl;

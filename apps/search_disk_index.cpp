@@ -59,8 +59,26 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       const uint32_t hop_budget = std::numeric_limits<uint32_t>::max(),
                       const float et_sat_gamma = 1.0f, const uint32_t et_sat_delta = 0,
                       const double neighbor_cache_gb = 0.0,
-                      const float et_theta_exact = std::numeric_limits<float>::max())
+                      const float et_theta_exact = std::numeric_limits<float>::max(),
+                      const uint32_t et_ref_rank = 0, const uint32_t et_min_hops = 0,
+                      const bool oracle_hops = false, const uint32_t et_conv_delta = 0,
+                      const uint32_t et_conv_width = 0, const bool dump_features = false,
+                      const std::string &self_ids_file = "",
+                      const float et_verify_alpha = std::numeric_limits<float>::max(),
+                      const uint32_t et_verify_patience = 1,
+                      const bool et_exact_led = false,
+                      const uint32_t et_exact_patience = 1,
+                      const float et_exact_beta = std::numeric_limits<float>::max())
 {
+    // Leave-one-out self-exclusion ids (one per query; base-vector-as-query training).
+    std::vector<uint32_t> self_ids;
+    if (!self_ids_file.empty() && file_exists(self_ids_file))
+    {
+        std::ifstream sf(self_ids_file, std::ios::binary);
+        int32_t sn = 0, sd = 0; sf.read((char *)&sn, 4); sf.read((char *)&sd, 4);
+        self_ids.resize((size_t)sn * sd);
+        sf.read((char *)self_ids.data(), (size_t)sn * sd * sizeof(uint32_t));
+    }
     diskann::cout << "Search parameters: #threads: " << num_threads << ", ";
     if (beamwidth <= 0)
         diskann::cout << "beamwidth to be optimized for each L value" << std::flush;
@@ -232,6 +250,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         query_result_dists[test_id].resize(recall_at * query_num);
 
         auto stats = new diskann::QueryStats[query_num];
+        std::vector<std::vector<float>> feat_logs(dump_features ? query_num : 0);
 
         std::vector<uint64_t> query_result_ids_64(recall_at * query_num);
         auto s = std::chrono::high_resolution_clock::now();
@@ -249,8 +268,13 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                     optimized_beamwidth, false, (LabelT)0,
                     std::numeric_limits<uint32_t>::max(),
                     et_theta, hop_budget, et_sat_gamma, et_sat_delta,
-                    et_theta_exact, 0,
-                    use_reorder_data, stats + i, nullptr);
+                    et_theta_exact, et_conv_delta,
+                    use_reorder_data, stats + i,
+                    ((oracle_hops || dump_features) && gt_ids != nullptr) ? gt_ids + (size_t)i * gt_dim : nullptr,
+                    et_ref_rank, et_min_hops, et_conv_width,
+                    dump_features ? &feat_logs[i] : nullptr,
+                    self_ids.empty() ? std::numeric_limits<uint32_t>::max() : self_ids[i],
+                    et_verify_alpha, et_verify_patience, et_exact_led, et_exact_patience, et_exact_beta);
             }
             else
             {
@@ -270,8 +294,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                     optimized_beamwidth, true, label_for_search,
                     std::numeric_limits<uint32_t>::max(),
                     et_theta, hop_budget, et_sat_gamma, et_sat_delta,
-                    et_theta_exact, 0,
-                    use_reorder_data, stats + i, nullptr);
+                    et_theta_exact, et_conv_delta,
+                    use_reorder_data, stats + i, nullptr, et_ref_rank, et_min_hops, et_conv_width);
             }
         }
         auto e = std::chrono::high_resolution_clock::now();
@@ -331,6 +355,34 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             for (size_t qi = 0; qi < query_num; qi++)
                 per_query_hops[qi] = stats[qi].n_beam_hops;
             diskann::save_bin<uint32_t>(hops_path, per_query_hops.data(), query_num, 1);
+
+            if (oracle_hops)
+            {
+                std::string opath = result_output_prefix + "_" + std::to_string(L) + "_oraclehops_uint32.bin";
+                std::vector<uint32_t> per_query_oracle(query_num);
+                for (size_t qi = 0; qi < query_num; qi++)
+                    per_query_oracle[qi] = stats[qi].oracle_hops; // 0 = never reached full recall
+                diskann::save_bin<uint32_t>(opath, per_query_oracle.data(), query_num, 1);
+            }
+
+            if (dump_features)
+            {
+                // Combined per-hop feature file: [int32 n_queries][int32 feat_dim]
+                // then per query: [int32 n_hops][n_hops*feat_dim floats].
+                std::string fpath = result_output_prefix + "_" + std::to_string(L) + "_features.bin";
+                std::ofstream ff(fpath, std::ios::binary);
+                int32_t nq = (int32_t)query_num, fdim = 17;
+                ff.write((char *)&nq, 4);
+                ff.write((char *)&fdim, 4);
+                for (size_t qi = 0; qi < query_num; qi++)
+                {
+                    int32_t nh = (int32_t)(feat_logs[qi].size() / fdim);
+                    ff.write((char *)&nh, 4);
+                    ff.write((char *)feat_logs[qi].data(), feat_logs[qi].size() * sizeof(float));
+                }
+                ff.close();
+                diskann::cout << "Wrote features: " << fpath << std::endl;
+            }
         }
 
         delete[] stats;
@@ -371,6 +423,18 @@ int main(int argc, char **argv)
     uint32_t et_sat_delta = 0;
     double neighbor_cache_gb = 0.0;
     float et_theta_exact = 1e9f;
+    uint32_t et_ref_rank = 0;
+    uint32_t et_min_hops = 0;
+    bool oracle_hops = false;
+    uint32_t et_conv_delta = 0;
+    uint32_t et_conv_width = 0;
+    bool dump_features = false;
+    std::string self_ids_file;
+    float et_verify_alpha = std::numeric_limits<float>::max();
+    uint32_t et_verify_patience = 1;
+    bool et_exact_led = false;
+    uint32_t et_exact_patience = 1;
+    float et_exact_beta = std::numeric_limits<float>::max();
 
     po::options_description desc{
         program_options_utils::make_program_description("search_disk_index", "Searches on-disk DiskANN indexes")};
@@ -441,6 +505,51 @@ int main(int argc, char **argv)
                                        "Bounded neighbor cache size in GB (0 = disabled). Shared across queries.");
         optional_configs.add_options()("et_theta_exact", po::value<float>(&et_theta_exact)->default_value(1e9f),
                                        "Guaranteed ET: stop when best_unexp_pq > kth_exact * theta. Default 1e9 (disabled).");
+        optional_configs.add_options()("et_ref_rank", po::value<uint32_t>(&et_ref_rank)->default_value(0),
+                                       "θ-ET reference rank: compare best unexpanded vs the ref_rank-th candidate "
+                                       "instead of the k-th. 0 = use k (classic). Larger = wider attention window "
+                                       "toward L (more conservative ET).");
+        optional_configs.add_options()("et_min_hops", po::value<uint32_t>(&et_min_hops)->default_value(0),
+                                       "ET grace period: θ-ET only activates after a query has run this many "
+                                       "hops. Set to the profiled P50/P75 hop count so only the long-running "
+                                       "tail queries get terminated. 0 = no grace (ET from hop 0).");
+        optional_configs.add_options()("oracle_hops", po::bool_switch(&oracle_hops),
+                                       "Analysis only: record per-query oracle hop (earliest hop whose exact "
+                                       "top-K matches ground truth) and dump to *_oraclehops_uint32.bin. "
+                                       "Requires gt_file. O(N log N)/hop overhead.");
+        optional_configs.add_options()("et_conv_delta", po::value<uint32_t>(&et_conv_delta)->default_value(0),
+                                       "Patience ET: terminate when the exact top-K set is unchanged for this "
+                                       "many consecutive hops. 0 = disabled.");
+        optional_configs.add_options()("et_conv_width", po::value<uint32_t>(&et_conv_width)->default_value(0),
+                                       "Patience convergence window: track stability of the top-M set "
+                                       "(M=et_conv_width) instead of top-K. 0 = use K. Wider M = more reliable "
+                                       "converged signal (catches true NNs still rising through ranks K..M).");
+        optional_configs.add_options()("self_ids_file",
+                                       po::value<std::string>(&self_ids_file)->default_value(std::string("")),
+                                       "Leave-one-out: bin [n][1][n uint32] of each query's own base id to "
+                                       "exclude from results (base-vector-as-query training). Empty = off.");
+        optional_configs.add_options()("dump_features", po::bool_switch(&dump_features),
+                                       "Analysis only: dump per-hop raw features (8/hop) for learned-ET training "
+                                       "to *_features.bin. Requires gt_file. Heavy (sorts full_retset each hop).");
+        optional_configs.add_options()("et_verify_alpha",
+                                       po::value<float>(&et_verify_alpha)->default_value(std::numeric_limits<float>::max()),
+                                       "Predict-then-verify ET: layer-2 exact alpha (FLT_MAX = disabled). θ-ET (et_theta) "
+                                       "becomes a PQ predictor; stop only if min(this-hop exact) > kth_exact * alpha.");
+        optional_configs.add_options()("et_verify_patience",
+                                       po::value<uint32_t>(&et_verify_patience)->default_value(1),
+                                       "Predict-then-verify ET: consecutive hops where both layers agree before "
+                                       "stopping (1 = stop on first trigger).");
+        optional_configs.add_options()("et_exact_led", po::bool_switch(&et_exact_led),
+                                       "ET order = exact-led: decide at hop top using PREVIOUS hop's exact "
+                                       "(free, no verify-beam) then PQ look-ahead. Needs et_verify_alpha & et_theta.");
+        optional_configs.add_options()("et_exact_patience",
+                                       po::value<uint32_t>(&et_exact_patience)->default_value(1),
+                                       "Dual-rail ET patience: consecutive hops where BOTH rails fire before stopping. "
+                                       "Use et_conv_width=2k. 1 = stop on first joint trigger.");
+        optional_configs.add_options()("et_exact_beta",
+                                       po::value<float>(&et_exact_beta)->default_value(std::numeric_limits<float>::max()),
+                                       "Dual-rail ET: exact-convergence rail beta (FLT_MAX=disabled). Fires when "
+                                       "k2-th EXACT < (best EXACT)*beta (top collapsed to plateau). PQ rail uses et_theta_exact (=alpha).");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -521,17 +630,20 @@ int main(int argc, char **argv)
                 return search_disk_index<float, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb, et_theta_exact);
+                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb, et_theta_exact,
+                    et_ref_rank, et_min_hops);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb, et_theta_exact);
+                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb, et_theta_exact,
+                    et_ref_rank, et_min_hops);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
                     num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data,
-                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb, et_theta_exact);
+                    et_theta, et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb, et_theta_exact,
+                    et_ref_rank, et_min_hops);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;
@@ -544,17 +656,23 @@ int main(int argc, char **argv)
                 return search_disk_index<float>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                 num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                 fail_if_recall_below, query_filters, use_reorder_data, et_theta,
-                                                et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
+                                                et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb,
+                                                et_theta_exact, et_ref_rank, et_min_hops, oracle_hops, et_conv_delta, et_conv_width,
+                    dump_features, self_ids_file, et_verify_alpha, et_verify_patience, et_exact_led, et_exact_patience, et_exact_beta);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                  num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                  fail_if_recall_below, query_filters, use_reorder_data, et_theta,
-                                                 et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
+                                                 et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb,
+                                                 et_theta_exact, et_ref_rank, et_min_hops, oracle_hops, et_conv_delta, et_conv_width,
+                    dump_features, self_ids_file, et_verify_alpha, et_verify_patience, et_exact_led, et_exact_patience, et_exact_beta);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                   num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                   fail_if_recall_below, query_filters, use_reorder_data, et_theta,
-                                                  et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb);
+                                                  et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb,
+                                                 et_theta_exact, et_ref_rank, et_min_hops, oracle_hops, et_conv_delta, et_conv_width,
+                    dump_features, self_ids_file, et_verify_alpha, et_verify_patience, et_exact_led, et_exact_patience, et_exact_beta);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;
