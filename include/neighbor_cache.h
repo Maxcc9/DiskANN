@@ -116,7 +116,7 @@ class NeighborCache
 // BoundedNeighborCache – Phase 3 on-demand, memory-bounded CLOCK cache.
 //
 // Capacity is expressed in bytes at init() time.  Internally the cache is
-// sharded across NUM_SHARDS independent shards to reduce lock contention.
+// sharded across num_shards_ independent shards to reduce lock contention.
 // Each shard owns a flat data array of size (capacity_per_shard × max_degree)
 // uint32_t values; entries are addressed by slot index.
 //
@@ -149,11 +149,24 @@ class BoundedNeighborCache
     //
     // When coord_bytes > 0, each slot stores both neighbor IDs and raw coordinates.
     // The effective node capacity is reduced accordingly:
-    //   capacity_per_shard = capacity_bytes / (max_degree*4 + coord_bytes) / NUM_SHARDS
-    void init(size_t capacity_bytes, uint32_t max_degree, size_t coord_bytes = 0)
+    //   capacity_per_shard = capacity_bytes / (max_degree*4 + coord_bytes) / num_shards_
+    // num_threads : number of concurrent worker threads (writers). The shard
+    // count is derived from it — one lock stripe per worker thread, rounded up
+    // to a power of two — so shard selection is a bitmask and there is no tuned
+    // constant. Because insert() is non-blocking (try-lock, skip on contention),
+    // no contention-headroom factor is needed.
+    void init(size_t capacity_bytes, uint32_t max_degree, size_t coord_bytes = 0, uint32_t num_threads = 1)
     {
         if (capacity_bytes == 0 || max_degree == 0)
             return;
+
+        // S = 2^ceil(log2(T)): one shard per worker thread, rounded up to a
+        // power of two (enables `node_id & (S-1)` indexing instead of modulo).
+        num_shards_ = 1;
+        while (num_shards_ < std::max<uint32_t>(1, num_threads))
+            num_shards_ <<= 1;
+        shard_mask_ = num_shards_ - 1;
+        shards_     = std::make_unique<Shard[]>(num_shards_);
 
         max_degree_  = max_degree;
         coord_bytes_ = coord_bytes;
@@ -162,10 +175,11 @@ class BoundedNeighborCache
         const size_t total_bytes_per_slot = nbr_bytes_per_slot + coord_bytes_;
         const size_t total_slots          = capacity_bytes / total_bytes_per_slot;
         capacity_per_shard_               = static_cast<uint32_t>(
-            std::max<size_t>(1, total_slots / NUM_SHARDS));
+            std::max<size_t>(1, total_slots / num_shards_));
 
-        for (auto &shard : shards_)
+        for (uint32_t sh = 0; sh < num_shards_; ++sh)
         {
+            auto &shard = shards_[sh];
             shard.capacity = capacity_per_shard_;
             shard.size     = 0;
             shard.data     = std::make_unique<uint32_t[]>(
@@ -211,7 +225,7 @@ class BoundedNeighborCache
     {
         if (capacity_per_shard_ == 0)
             return false;
-        const uint32_t shard_idx = node_id % NUM_SHARDS;
+        const uint32_t shard_idx = node_id & shard_mask_;
         const Shard    &shard    = shards_[shard_idx];
         std::shared_lock<std::shared_mutex> lock(shard.mu);
         return shard.index.find(node_id) != shard.index.end();
@@ -220,7 +234,7 @@ class BoundedNeighborCache
     // Total cache slots across all shards.
     size_t total_capacity_nodes() const
     {
-        return static_cast<size_t>(capacity_per_shard_) * NUM_SHARDS;
+        return static_cast<size_t>(capacity_per_shard_) * num_shards_;
     }
 
     // Lookup node_id.  Returns a pointer to the Entry on hit (and sets the
@@ -231,7 +245,7 @@ class BoundedNeighborCache
         if (capacity_per_shard_ == 0)
             return nullptr;
 
-        const uint32_t shard_idx = node_id % NUM_SHARDS;
+        const uint32_t shard_idx = node_id & shard_mask_;
         Shard         &shard     = shards_[shard_idx];
 
         std::shared_lock<std::shared_mutex> lock(shard.mu);
@@ -266,7 +280,7 @@ class BoundedNeighborCache
         if (frozen_.load(std::memory_order_relaxed))
             return;
 
-        const uint32_t shard_idx = node_id % NUM_SHARDS;
+        const uint32_t shard_idx = node_id & shard_mask_;
         Shard         &shard     = shards_[shard_idx];
 
         std::unique_lock<std::shared_mutex> lock(shard.mu, std::try_to_lock);
@@ -311,7 +325,7 @@ class BoundedNeighborCache
         if (capacity_per_shard_ == 0 || coord_bytes_ == 0)
             return false;
 
-        const uint32_t shard_idx = node_id % NUM_SHARDS;
+        const uint32_t shard_idx = node_id & shard_mask_;
         const Shard   &shard     = shards_[shard_idx];
 
         std::shared_lock<std::shared_mutex> lock(shard.mu);
@@ -329,8 +343,10 @@ class BoundedNeighborCache
 
     bool has_coords() const { return coord_bytes_ > 0; }
 
+    // Number of shards (= 2^ceil(log2(num_threads))), decided at init().
+    uint32_t num_shards() const { return num_shards_; }
+
   private:
-    static constexpr uint32_t NUM_SHARDS    = 256;
     // Saturating upper bound for CLOCK ref counter.
     // Hot nodes (accessed ≥ MAX_REF_COUNT times between eviction sweeps) survive
     // MAX_REF_COUNT full CLOCK passes rather than just one.
@@ -370,7 +386,9 @@ class BoundedNeighborCache
         }
     }
 
-    std::array<Shard, NUM_SHARDS> shards_;
+    std::unique_ptr<Shard[]> shards_;           // num_shards_ shards, allocated at init()
+    uint32_t num_shards_{0};                    // = 2^ceil(log2(num_threads))
+    uint32_t shard_mask_{0};                    // = num_shards_ - 1 (shard_idx = node_id & shard_mask_)
     uint32_t max_degree_{0};
     uint32_t capacity_per_shard_{0};
     size_t   coord_bytes_{0};

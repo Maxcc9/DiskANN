@@ -1418,14 +1418,17 @@ void PQFlashIndex<T, LabelT>::init_bounded_neighbor_cache(size_t capacity_bytes)
         diskann::cout << "[BoundedCache] Index not loaded yet; cannot initialise." << std::endl;
         return;
     }
-    _bounded_cache.init(capacity_bytes, static_cast<uint32_t>(_max_degree), _disk_bytes_per_point);
+    _bounded_cache.init(capacity_bytes, static_cast<uint32_t>(_max_degree), _disk_bytes_per_point,
+                        static_cast<uint32_t>(_max_nthreads));
     const size_t nodes = _bounded_cache.total_capacity_nodes();
     const double pct   = (_num_points > 0)
                          ? 100.0 * static_cast<double>(nodes) / static_cast<double>(_num_points)
                          : 0.0;
     diskann::cout << "[BoundedCache] capacity=" << nodes << " nodes ("
                   << pct << "% of " << _num_points << "), "
-                  << capacity_bytes / (1024.0 * 1024.0 * 1024.0) << " GB" << std::endl;
+                  << capacity_bytes / (1024.0 * 1024.0 * 1024.0) << " GB, "
+                  << _bounded_cache.num_shards() << " shards (from " << _max_nthreads
+                  << " worker threads)" << std::endl;
 }
 
 #ifdef USE_BING_INFRA
