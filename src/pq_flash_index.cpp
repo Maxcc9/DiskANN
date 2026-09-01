@@ -14,6 +14,51 @@
 #include "windows_aligned_file_reader.h"
 #else
 #include "linux_aligned_file_reader.h"
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <atomic>
+#include <cerrno>
+#include <cstring>
+#endif
+
+#ifndef _WINDOWS
+// CA-IOS: per-thread I/O priority escalation. DiskANN's server model is one worker
+// thread = one in-flight query at a time (see linux_aligned_file_reader.cpp), so
+// "escalate this query's I/O priority" == "escalate this thread's ioprio for the
+// remainder of the call" -- no glibc wrapper exists for ioprio_set, so we syscall directly.
+// Validated (fio, this hardware, mq-deadline scheduler): RT vs BE gives ~3.96x P99
+// under queue contention; scheduler=none gives no effect (see docs/... CA-IOS val1).
+#ifndef IOPRIO_CLASS_SHIFT
+#define IOPRIO_CLASS_SHIFT 13
+#endif
+#define CA_IOS_IOPRIO_CLASS_RT 1
+#define CA_IOS_IOPRIO_CLASS_BE 2
+#define CA_IOS_IOPRIO_VALUE(cls, data) (((cls) << IOPRIO_CLASS_SHIFT) | (data))
+
+// Sets this OS thread's I/O priority. Requires CAP_SYS_ADMIN (or root) for RT class;
+// silently no-ops on EPERM so the search still runs correctly (just without the
+// priority boost) when the server isn't launched with elevated privilege.
+static inline void ca_ios_set_thread_ioprio(int cls, int level)
+{
+    const pid_t tid = static_cast<pid_t>(syscall(SYS_gettid));
+    errno = 0;
+    long ret = syscall(SYS_ioprio_set, /*IOPRIO_WHO_PROCESS=*/1, tid, CA_IOS_IOPRIO_VALUE(cls, level));
+    if (ret != 0)
+    {
+        static std::atomic<int> warn_count{0};
+        if (warn_count.fetch_add(1) < 5) // don't flood the log under high concurrency
+            std::cerr << "CA-IOS: ioprio_set(tid=" << tid << ", cls=" << cls << ") failed, ret=" << ret
+                      << " errno=" << errno << " (" << strerror(errno) << ")\n";
+    }
+    else
+    {
+        long got = syscall(SYS_ioprio_get, /*IOPRIO_WHO_PROCESS=*/1, tid);
+        static std::atomic<int> ok_count{0};
+        if (ok_count.fetch_add(1) < 5)
+            std::cerr << "CA-IOS: ioprio_set(tid=" << tid << ", cls=" << cls << ") OK, readback=" << got
+                      << " (class=" << (got >> IOPRIO_CLASS_SHIFT) << ")\n";
+    }
+}
 #endif
 
 #define READ_U64(stream, val) stream.read((char *)&val, sizeof(uint64_t))
@@ -1541,8 +1586,15 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  const uint32_t et_conv_width, std::vector<float> *feat_log,
                                                  const uint32_t self_exclude_id, const float et_verify_alpha,
                                                  const uint32_t et_verify_patience, const bool et_exact_led,
-                                                 const uint32_t et_exact_patience, const float et_exact_beta)
+                                                 const uint32_t et_exact_patience, const float et_exact_beta,
+                                                 const uint32_t et_priority_hop_threshold)
 {
+#ifndef _WINDOWS
+    // CA-IOS: reset this thread to BE at the start of every query so priority from a
+    // previous (escalated) query on this same worker thread doesn't leak into the next one.
+    if (et_priority_hop_threshold > 0)
+        ca_ios_set_thread_ioprio(CA_IOS_IOPRIO_CLASS_BE, 4);
+#endif
     // Predict-then-verify ET: θ-ET (PQ) is layer-1 predictor; this hop's minimum
     // EXACT distance vs the conv_width-th best EXACT distance is layer-2 verifier.
     const bool et_verify_on = (et_verify_alpha < std::numeric_limits<float>::max());
@@ -1707,6 +1759,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     uint32_t cmps = 0;
     uint32_t hops = 0;
     uint32_t num_ios = 0;
+    bool ca_ios_priority_escalated = false; // CA-IOS: has this query's thread been bumped to RT yet?
 
     // For feature-dump (learned-ET): track previous-hop top-k / top-40 id sets to
     // detect membership churn. Only used when feat_log != nullptr.
@@ -2343,6 +2396,20 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         if (hop_min_exact < global_best_exact)
             global_best_exact = hop_min_exact;
         hops++;
+
+#ifndef _WINDOWS
+        // CA-IOS: this query has run past the "should have been ET'd by now" point and is
+        // therefore part of the tail (see memory/project_dual_gate_et_discovery.md's P99
+        // discussion) — bump this worker thread's I/O priority so its remaining reads jump
+        // the shared NVMe queue ahead of the bulk of fast/easy queries on the other 31
+        // threads. One-shot per query (guarded by ca_ios_priority_escalated); reset to BE
+        // happens at the top of the next cached_beam_search call on this same thread.
+        if (et_priority_hop_threshold > 0 && !ca_ios_priority_escalated && hops >= et_priority_hop_threshold)
+        {
+            ca_ios_set_thread_ioprio(CA_IOS_IOPRIO_CLASS_RT, 0);
+            ca_ios_priority_escalated = true;
+        }
+#endif
     }
 
     if (stats != nullptr)

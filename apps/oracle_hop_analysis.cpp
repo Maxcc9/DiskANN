@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iostream>
 #include <numeric>
+#include <sstream>
 #include <vector>
 
 #include "disk_utils.h"
@@ -25,14 +26,66 @@
 
 namespace po = boost::program_options;
 
+// One row of the ET-config grid (--grid_file). Pass-1 (full search) and pass-2 (oracle
+// replay) never depend on any of these fields, so a whole grid can share one index load
+// and one pass-1/pass-2 pass per query, looping only pass-3 (the cheap in-memory ET
+// search) over every row -- this is what makes wide sweeps tractable on a 100M-node index.
+struct EtConfig
+{
+    std::string label;
+    float    et_theta = std::numeric_limits<float>::max();
+    float    et_theta_exact = std::numeric_limits<float>::max();
+    uint32_t et_conv_width = 0;
+    uint32_t et_exact_patience = 1;
+    uint32_t et_ref_rank = 0;
+    uint32_t et_min_hops = 0;
+    float    et_verify_alpha = std::numeric_limits<float>::max();
+    uint32_t et_verify_patience = 1;
+    bool     et_exact_led = false;
+};
+
+std::vector<EtConfig> load_grid_file(const std::string &path)
+{
+    std::vector<EtConfig> grid;
+    std::ifstream f(path);
+    if (!f) { std::cerr << "ERROR: cannot open grid_file " << path << "\n"; return grid; }
+    std::string line;
+    std::getline(f, line); // header, ignored (documents column order)
+    while (std::getline(f, line))
+    {
+        if (line.empty() || line[0] == '#') continue;
+        std::stringstream ss(line);
+        std::string tok;
+        EtConfig c;
+        auto next = [&]() { std::getline(ss, tok, ','); return tok; };
+        c.label = next();
+        c.et_theta          = next().empty() ? std::numeric_limits<float>::max() : std::stof(tok);
+        c.et_theta_exact    = next().empty() ? std::numeric_limits<float>::max() : std::stof(tok);
+        c.et_conv_width     = next().empty() ? 0 : (uint32_t)std::stoul(tok);
+        c.et_exact_patience = next().empty() ? 1 : (uint32_t)std::stoul(tok);
+        c.et_ref_rank       = next().empty() ? 0 : (uint32_t)std::stoul(tok);
+        c.et_min_hops       = next().empty() ? 0 : (uint32_t)std::stoul(tok);
+        c.et_verify_alpha   = next().empty() ? std::numeric_limits<float>::max() : std::stof(tok);
+        c.et_verify_patience= next().empty() ? 1 : (uint32_t)std::stoul(tok);
+        c.et_exact_led      = next() == "1";
+        grid.push_back(c);
+    }
+    return grid;
+}
+
 template <typename T>
 int run_analysis(const std::string &index_prefix, const std::string &query_file, const std::string &gt_file,
                  const uint64_t K, const uint64_t L, const uint64_t W, const uint32_t T_threads,
                  const float et_theta, const float et_theta_exact,
                  const uint32_t et_conv_delta,
                  const float sat_gamma, const uint32_t sat_delta,
+                 const uint32_t et_conv_width, const uint32_t et_exact_patience,
+                 const uint32_t et_ref_rank, const uint32_t et_min_hops,
+                 const float et_verify_alpha, const uint32_t et_verify_patience,
+                 const bool et_exact_led,
                  const size_t bnc_bytes,
-                 const std::string &out_csv, const std::string &out_summary)
+                 const std::string &out_csv, const std::string &out_summary,
+                 const std::string &grid_file)
 {
     // ── Load query ──────────────────────────────────────────────────────
     T *queries = nullptr;
@@ -67,12 +120,36 @@ int run_analysis(const std::string &index_prefix, const std::string &query_file,
     }
     std::cout << "Index loaded. Running oracle hop analysis...\n";
 
+    // ── Build the ET-config grid. Single-config legacy mode = a 1-row "grid" made
+    // from the flat CLI et_* args, so both code paths below are unified. ──────────
+    std::vector<EtConfig> grid;
+    if (!grid_file.empty())
+    {
+        grid = load_grid_file(grid_file);
+        if (grid.empty()) { std::cerr << "ERROR: empty/unreadable grid_file\n"; return -1; }
+        std::cout << "Loaded " << grid.size() << " ET configs from " << grid_file << "\n";
+    }
+    else
+    {
+        EtConfig c;
+        c.label = "default";
+        c.et_theta = et_theta; c.et_theta_exact = et_theta_exact;
+        c.et_conv_width = et_conv_width; c.et_exact_patience = et_exact_patience;
+        c.et_ref_rank = et_ref_rank; c.et_min_hops = et_min_hops;
+        c.et_verify_alpha = et_verify_alpha; c.et_verify_patience = et_verify_patience;
+        c.et_exact_led = et_exact_led;
+        grid.push_back(c);
+    }
+    const size_t nconf = grid.size();
+
     // ── Per-query buffers ────────────────────────────────────────────────
     std::vector<uint64_t> res_ids_full(K), res_ids_et(K);
     std::vector<float>    res_dists_full(K), res_dists_et(K);
 
-    std::vector<uint32_t> total_hops_vec(nq), oracle_hops_vec(nq), et_hops_vec(nq);
-    std::vector<uint32_t> et_recall_correct(nq);
+    std::vector<uint32_t> total_hops_vec(nq), oracle_hops_vec(nq);
+    // et_hops_vec / et_recall_correct: one row per query, one column per grid config.
+    std::vector<std::vector<uint32_t>> et_hops_vec(nconf, std::vector<uint32_t>(nq));
+    std::vector<std::vector<uint32_t>> et_recall_correct(nconf, std::vector<uint32_t>(nq));
 
     diskann::QueryStats stats_full, stats_oracle, stats_et;
     std::vector<uint32_t> oracle_ids(K);  // final result IDs cast to uint32_t
@@ -82,7 +159,7 @@ int run_analysis(const std::string &index_prefix, const std::string &query_file,
         const T        *q  = queries + qi * qdim_aligned;
         const uint32_t *gt = gt_ids + qi * gt_dim;
 
-        // ── Pass 1: full search → get final result IDs and total hops ──
+        // ── Pass 1: full search → get final result IDs and total hops (config-independent) ──
         stats_full = diskann::QueryStats{};
         index->cached_beam_search(q, K, L, res_ids_full.data(), res_dists_full.data(), W,
                                   false, (uint32_t)0,
@@ -99,7 +176,7 @@ int run_analysis(const std::string &index_prefix, const std::string &query_file,
         for (uint64_t k = 0; k < K; k++)
             oracle_ids[k] = (uint32_t)res_ids_full[k];
 
-        // ── Pass 2: oracle replay — first hop where full_retset top-K = oracle_ids ──
+        // ── Pass 2: oracle replay (also config-independent) ──
         stats_oracle = diskann::QueryStats{};
         index->cached_beam_search(q, K, L, res_ids_full.data(), res_dists_full.data(), W,
                                   false, (uint32_t)0,
@@ -114,26 +191,34 @@ int run_analysis(const std::string &index_prefix, const std::string &query_file,
 
         oracle_hops_vec[qi] = stats_oracle.oracle_hops;
 
-        // ── Pass 3: ET search (theta-ET / exact-kth-ET / sat-ET / conv-ET) ────
-        stats_et = diskann::QueryStats{};
-        index->cached_beam_search(q, K, L, res_ids_et.data(), res_dists_et.data(), W,
-                                  false, (uint32_t)0,
-                                  std::numeric_limits<uint32_t>::max(),
-                                  et_theta,
-                                  std::numeric_limits<uint32_t>::max(),
-                                  sat_gamma, sat_delta,
-                                  et_theta_exact, et_conv_delta,
-                                  false,
-                                  &stats_et, nullptr);
+        // ── Pass 3: ET search, once per grid config ──────────────────────────
+        for (size_t ci = 0; ci < nconf; ci++)
+        {
+            const EtConfig &c = grid[ci];
+            stats_et = diskann::QueryStats{};
+            index->cached_beam_search(q, K, L, res_ids_et.data(), res_dists_et.data(), W,
+                                      false, (uint32_t)0,
+                                      std::numeric_limits<uint32_t>::max(),
+                                      c.et_theta,
+                                      std::numeric_limits<uint32_t>::max(),
+                                      sat_gamma, sat_delta,
+                                      c.et_theta_exact, et_conv_delta,
+                                      false,
+                                      &stats_et, nullptr,
+                                      c.et_ref_rank, c.et_min_hops, c.et_conv_width,
+                                      /*feat_log=*/nullptr,
+                                      /*self_exclude_id=*/std::numeric_limits<uint32_t>::max(),
+                                      c.et_verify_alpha, c.et_verify_patience,
+                                      c.et_exact_led, c.et_exact_patience);
 
-        et_hops_vec[qi] = stats_et.n_beam_hops;
+            et_hops_vec[ci][qi] = stats_et.n_beam_hops;
 
-        // ET recall: compare ET output against GT
-        uint32_t correct = 0;
-        for (uint64_t k = 0; k < K; k++)
-            for (uint64_t g = 0; g < K; g++)
-                if (res_ids_et[k] == gt[g]) { correct++; break; }
-        et_recall_correct[qi] = correct;
+            uint32_t correct = 0;
+            for (uint64_t k = 0; k < K; k++)
+                for (uint64_t g = 0; g < K; g++)
+                    if (res_ids_et[k] == gt[g]) { correct++; break; }
+            et_recall_correct[ci][qi] = correct;
+        }
 
         if ((qi + 1) % 1000 == 0)
             std::cout << "  " << (qi + 1) << "/" << nq << " queries done\n";
@@ -148,73 +233,54 @@ int run_analysis(const std::string &index_prefix, const std::string &query_file,
         return v[(size_t)(p * v.size())];
     };
 
-    // oracle_hops == 0 should not happen (stability must be reached if search completes)
     size_t oracle_found = 0;
     for (auto h : oracle_hops_vec) if (h > 0) oracle_found++;
 
     double mean_total  = mean_f(total_hops_vec);
     double mean_oracle = mean_f(oracle_hops_vec);
-    double mean_et     = mean_f(et_hops_vec);
-    double mean_et_recall = (double)std::accumulate(et_recall_correct.begin(), et_recall_correct.end(), 0ULL) / (nq * K);
+    double waste_oracle = (mean_total - mean_oracle) / mean_total * 100.0;
 
-    std::cout << "\n";
-    std::cout << "=======================================================\n";
-    std::cout << "Oracle Hop Analysis — SIFT100M, L=" << L << " W=" << W << " K=" << K << "\n";
+    std::cout << "\n=======================================================\n";
+    std::cout << "Oracle Hop Analysis — L=" << L << " W=" << W << " K=" << K
+              << "  (" << nconf << " ET config" << (nconf > 1 ? "s" : "") << ")\n";
     std::cout << "=======================================================\n";
     std::cout << "  Queries: " << nq << "  oracle_found: " << oracle_found
-              << " (" << 100.0 * oracle_found / nq << "%)\n\n";
+              << " (" << 100.0 * oracle_found / nq << "%)\n";
+    std::cout << "  Mean total hops:   " << mean_total << "\n";
+    std::cout << "  Mean oracle hops:  " << mean_oracle << "\n";
+    std::cout << "  Waste fraction (oracle): " << waste_oracle << "%\n\n";
 
-    std::cout << "  Mean total hops:   " << mean_total
-              << "  P50=" << percentile(total_hops_vec, 0.50)
-              << "  P99=" << percentile(total_hops_vec, 0.99) << "\n";
-    std::cout << "  Mean oracle hops:  " << mean_oracle
-              << "  P50=" << percentile(oracle_hops_vec, 0.50)
-              << "  P99=" << percentile(oracle_hops_vec, 0.99) << "\n";
-    std::cout << "  Mean ET hops:      " << mean_et
-              << "  P50=" << percentile(et_hops_vec, 0.50)
-              << "  P99=" << percentile(et_hops_vec, 0.99) << "\n";
-    std::cout << "  ET recall@K:       " << mean_et_recall * 100 << "%\n\n";
-
-    double waste_oracle = (mean_total - mean_oracle) / mean_total * 100.0;
-    double waste_et     = (mean_total - mean_et)     / mean_total * 100.0;
-    std::cout << "  Waste fraction (oracle): " << waste_oracle << "%\n";
-    std::cout << "  Waste fraction (ET):     " << waste_et     << "%\n\n";
-
-    // CDF of oracle hops
-    std::cout << "  CDF: % queries with oracle_hops ≤ H:\n";
-    for (uint32_t h : {1u,2u,3u,5u,8u,10u,15u,20u,25u,30u,40u,50u})
-    {
-        size_t cnt = 0;
-        for (auto v : oracle_hops_vec) if (v > 0 && v <= h) cnt++;
-        std::cout << "    ≤" << h << ": " << 100.0 * cnt / oracle_found << "%\n";
-    }
-    std::cout << "  CDF: % queries with ET_hops ≤ H:\n";
-    for (uint32_t h : {10u,20u,30u,40u,50u,80u,100u,120u,150u})
-    {
-        size_t cnt = 0;
-        for (auto v : et_hops_vec) if (v <= h) cnt++;
-        std::cout << "    ≤" << h << ": " << 100.0 * cnt / nq << "%\n";
-    }
-    std::cout << "=======================================================\n";
-
-    // ── Save summary CSV ─────────────────────────────────────────────────
+    // ── Save one combined summary CSV row per grid config ─────────────────
     {
         std::ofstream sf(out_summary);
-        sf << "metric,mean,p25,p50,p75,p99\n";
-        auto pct = [&](const std::vector<uint32_t> &v, double p) { return percentile(v, p); };
-        sf << "total_hops,"  << mean_total  << "," << pct(total_hops_vec,0.25)  << ","
-           << pct(total_hops_vec,0.50)  << "," << pct(total_hops_vec,0.75)  << "," << pct(total_hops_vec,0.99)  << "\n";
-        sf << "oracle_hops," << mean_oracle << "," << pct(oracle_hops_vec,0.25) << ","
-           << pct(oracle_hops_vec,0.50) << "," << pct(oracle_hops_vec,0.75) << "," << pct(oracle_hops_vec,0.99) << "\n";
-        sf << "et_hops,"     << mean_et     << "," << pct(et_hops_vec,0.25)     << ","
-           << pct(et_hops_vec,0.50)     << "," << pct(et_hops_vec,0.75)     << "," << pct(et_hops_vec,0.99)     << "\n";
-        sf << "waste_oracle_pct,"  << waste_oracle  << ",,,,\n";
-        sf << "waste_et_pct,"      << waste_et      << ",,,,\n";
-        sf << "et_recall_pct,"     << mean_et_recall*100 << ",,,,\n";
-        std::cout << "Summary saved: " << out_summary << "\n";
+        sf << "label,et_theta,et_theta_exact,et_conv_width,et_exact_patience,et_ref_rank,et_min_hops,"
+           << "et_verify_alpha,et_verify_patience,et_exact_led,"
+           << "mean_total_hops,mean_oracle_hops,mean_et_hops,waste_oracle_pct,waste_et_pct,"
+           << "capture_ratio_pct,et_recall_pct\n";
+        for (size_t ci = 0; ci < nconf; ci++)
+        {
+            const EtConfig &c = grid[ci];
+            double mean_et = mean_f(et_hops_vec[ci]);
+            double mean_et_recall = (double)std::accumulate(et_recall_correct[ci].begin(), et_recall_correct[ci].end(), 0ULL) / (nq * K);
+            double waste_et = (mean_total - mean_et) / mean_total * 100.0;
+            double capture = waste_oracle > 1e-9 ? waste_et / waste_oracle * 100.0 : 0.0;
+
+            std::cout << "  [" << c.label << "] mean_et_hops=" << mean_et
+                      << "  waste_et=" << waste_et << "%  capture=" << capture << "%"
+                      << "  recall=" << mean_et_recall * 100 << "%\n";
+
+            auto ff = [](float v) { return v == std::numeric_limits<float>::max() ? std::string("") : std::to_string(v); };
+            sf << c.label << "," << ff(c.et_theta) << "," << ff(c.et_theta_exact) << ","
+               << c.et_conv_width << "," << c.et_exact_patience << "," << c.et_ref_rank << "," << c.et_min_hops << ","
+               << ff(c.et_verify_alpha) << "," << c.et_verify_patience << "," << (c.et_exact_led ? 1 : 0) << ","
+               << mean_total << "," << mean_oracle << "," << mean_et << "," << waste_oracle << "," << waste_et << ","
+               << capture << "," << mean_et_recall * 100 << "\n";
+        }
+        std::cout << "\nSummary saved: " << out_summary << "\n";
     }
 
-    // ── Save per-query CSV ───────────────────────────────────────────────
+    // ── Save per-query CSV (single-config mode only; grid mode skips this) ──
+    if (nconf == 1 && !out_csv.empty())
     {
         std::ofstream qf(out_csv);
         qf << "query_id,total_hops,oracle_hops,et_hops,waste_oracle_pct,waste_et_pct,et_recall_k\n";
@@ -222,9 +288,9 @@ int run_analysis(const std::string &index_prefix, const std::string &query_file,
         {
             double wo = oracle_hops_vec[qi] > 0 ?
                         100.0 * (total_hops_vec[qi] - oracle_hops_vec[qi]) / std::max(total_hops_vec[qi], 1u) : -1;
-            double we = 100.0 * (total_hops_vec[qi] - et_hops_vec[qi]) / std::max(total_hops_vec[qi], 1u);
+            double we = 100.0 * (total_hops_vec[qi] - et_hops_vec[0][qi]) / std::max(total_hops_vec[qi], 1u);
             qf << qi << "," << total_hops_vec[qi] << "," << oracle_hops_vec[qi] << ","
-               << et_hops_vec[qi] << "," << wo << "," << we << "," << et_recall_correct[qi] << "\n";
+               << et_hops_vec[0][qi] << "," << wo << "," << we << "," << et_recall_correct[0][qi] << "\n";
         }
         std::cout << "Per-query CSV saved: " << out_csv << "\n";
     }
@@ -237,9 +303,12 @@ int run_analysis(const std::string &index_prefix, const std::string &query_file,
 
 int main(int argc, char **argv)
 {
-    std::string data_type, index_prefix, query_file, gt_file, out_csv, out_summary;
+    std::string data_type, index_prefix, query_file, gt_file, out_csv, out_summary, grid_file;
     uint64_t    K, L, W, T_threads, bnc_mb, sat_delta, et_conv_delta_u64;
-    float       et_theta, et_theta_exact, sat_gamma;
+    uint64_t    et_conv_width_u64, et_exact_patience_u64;
+    uint64_t    et_ref_rank_u64, et_min_hops_u64, et_verify_patience_u64;
+    bool        et_exact_led;
+    float       et_theta, et_theta_exact, sat_gamma, et_verify_alpha;
 
     po::options_description desc("oracle_hop_analysis options");
     desc.add_options()
@@ -257,8 +326,20 @@ int main(int argc, char **argv)
         ("sat_gamma",      po::value<float>(&sat_gamma)->default_value(1.0f), "saturation overlap fraction [0,1] (default: 1.0=all match)")
         ("sat_delta",      po::value<uint64_t>(&sat_delta)->default_value(0), "saturation patience hops (0=disabled)")
         ("et_conv_delta",  po::value<uint64_t>(&et_conv_delta_u64)->default_value(0), "exact-conv ET: stop when full_retset top-K unchanged for N hops (0=disabled)")
+        ("et_conv_width",  po::value<uint64_t>(&et_conv_width_u64)->default_value(0), "hybrid-exact ET: rank window M for exact-kth (0 -> k); matches search_server's --et_conv_width")
+        ("et_exact_patience", po::value<uint64_t>(&et_exact_patience_u64)->default_value(1), "hybrid-exact ET: consecutive triggering hops required; matches search_server's --et_exact_patience")
+        ("et_ref_rank",    po::value<uint64_t>(&et_ref_rank_u64)->default_value(0), "theta-ET reference rank (0 -> k); matches search_server's --et_ref_rank")
+        ("et_min_hops",    po::value<uint64_t>(&et_min_hops_u64)->default_value(0), "ET grace period in hops (0=off); matches search_server's --et_min_hops")
+        ("et_verify_alpha", po::value<float>(&et_verify_alpha)->default_value(std::numeric_limits<float>::max()), "predict-then-verify ET layer-2 exact alpha (FLT_MAX=disabled); matches search_server's --et_verify_alpha. Requires --et_theta set (layer-1 predictor) unless --et_exact_led")
+        ("et_verify_patience", po::value<uint64_t>(&et_verify_patience_u64)->default_value(1), "predict-then-verify ET: consecutive agreeing hops before stopping; matches search_server's --et_verify_patience")
+        ("et_exact_led",   po::bool_switch(&et_exact_led)->default_value(false), "predict-then-verify ET: lead with exact signal from prev hop, confirm with PQ look-ahead (inverse ordering)")
         ("bnc_mb",         po::value<uint64_t>(&bnc_mb)->default_value(0),    "BNC cache size in MB (0=disabled)")
-        ("out_csv",        po::value<std::string>(&out_csv)->required(),      "per-query output CSV")
+        ("grid_file",      po::value<std::string>(&grid_file)->default_value(""),
+                           "CSV of ET configs to sweep in one index load (columns: "
+                           "label,et_theta,et_theta_exact,et_conv_width,et_exact_patience,et_ref_rank,"
+                           "et_min_hops,et_verify_alpha,et_verify_patience,et_exact_led). "
+                           "When set, all other --et_* flags are ignored and out_summary gets one row per config.")
+        ("out_csv",        po::value<std::string>(&out_csv)->default_value(""), "per-query output CSV (single-config mode only)")
         ("out_summary",    po::value<std::string>(&out_summary)->required(),  "summary CSV");
 
     po::variables_map vm;
@@ -269,11 +350,11 @@ int main(int argc, char **argv)
     size_t bnc_bytes = (size_t)bnc_mb * 1024 * 1024;
 
     if (data_type == "uint8")
-        return run_analysis<uint8_t>(index_prefix, query_file, gt_file, K, L, W, T_threads, et_theta, et_theta_exact, (uint32_t)et_conv_delta_u64, sat_gamma, (uint32_t)sat_delta, bnc_bytes, out_csv, out_summary);
+        return run_analysis<uint8_t>(index_prefix, query_file, gt_file, K, L, W, T_threads, et_theta, et_theta_exact, (uint32_t)et_conv_delta_u64, sat_gamma, (uint32_t)sat_delta, (uint32_t)et_conv_width_u64, (uint32_t)et_exact_patience_u64, (uint32_t)et_ref_rank_u64, (uint32_t)et_min_hops_u64, et_verify_alpha, (uint32_t)et_verify_patience_u64, et_exact_led, bnc_bytes, out_csv, out_summary, grid_file);
     else if (data_type == "float")
-        return run_analysis<float>(index_prefix, query_file, gt_file, K, L, W, T_threads, et_theta, et_theta_exact, (uint32_t)et_conv_delta_u64, sat_gamma, (uint32_t)sat_delta, bnc_bytes, out_csv, out_summary);
+        return run_analysis<float>(index_prefix, query_file, gt_file, K, L, W, T_threads, et_theta, et_theta_exact, (uint32_t)et_conv_delta_u64, sat_gamma, (uint32_t)sat_delta, (uint32_t)et_conv_width_u64, (uint32_t)et_exact_patience_u64, (uint32_t)et_ref_rank_u64, (uint32_t)et_min_hops_u64, et_verify_alpha, (uint32_t)et_verify_patience_u64, et_exact_led, bnc_bytes, out_csv, out_summary, grid_file);
     else if (data_type == "int8")
-        return run_analysis<int8_t>(index_prefix, query_file, gt_file, K, L, W, T_threads, et_theta, et_theta_exact, (uint32_t)et_conv_delta_u64, sat_gamma, (uint32_t)sat_delta, bnc_bytes, out_csv, out_summary);
+        return run_analysis<int8_t>(index_prefix, query_file, gt_file, K, L, W, T_threads, et_theta, et_theta_exact, (uint32_t)et_conv_delta_u64, sat_gamma, (uint32_t)sat_delta, (uint32_t)et_conv_width_u64, (uint32_t)et_exact_patience_u64, (uint32_t)et_ref_rank_u64, (uint32_t)et_min_hops_u64, et_verify_alpha, (uint32_t)et_verify_patience_u64, et_exact_led, bnc_bytes, out_csv, out_summary, grid_file);
     else
     {
         std::cerr << "Unknown data_type: " << data_type << "\n";

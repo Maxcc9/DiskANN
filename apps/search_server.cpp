@@ -137,13 +137,15 @@ template <typename T> class SearchServer
                  const uint32_t et_verify_patience = 1,
                  const uint32_t bnc_seed_nodes = 0,
                  const float et_theta_exact = std::numeric_limits<float>::max(),
-                 const uint32_t et_exact_patience = 1)
+                 const uint32_t et_exact_patience = 1,
+                 const uint32_t et_priority_hop_threshold = 0)
         : _beamwidth(beamwidth), _et_sat_gamma(et_sat_gamma), _et_sat_delta(et_sat_delta),
           _qd_alpha(qd_alpha), _io_concurrency(io_concurrency),
           _hop_budget_cap(hop_budget_cap), _et_ref_rank(et_ref_rank), _et_conv_delta(et_conv_delta),
           _et_conv_width(et_conv_width), _et_min_hops(et_min_hops), _et_verify_alpha(et_verify_alpha),
           _et_verify_patience(et_verify_patience), _bnc_seed_nodes(bnc_seed_nodes),
-          _et_theta_exact(et_theta_exact), _et_exact_patience(et_exact_patience)
+          _et_theta_exact(et_theta_exact), _et_exact_patience(et_exact_patience),
+          _et_priority_hop_threshold(et_priority_hop_threshold)
     {
 #ifdef _WINDOWS
         static_assert(false, "search_server is currently implemented for POSIX platforms only.");
@@ -425,7 +427,8 @@ template <typename T> class SearchServer
                                    false, nullptr, nullptr,
                                    _et_ref_rank, _et_min_hops, _et_conv_width,
                                    nullptr, std::numeric_limits<uint32_t>::max(), _et_verify_alpha,
-                                   _et_verify_patience, false, _et_exact_patience);
+                                   _et_verify_patience, false, _et_exact_patience,
+                                   std::numeric_limits<float>::max(), _et_priority_hop_threshold);
         _active_searches.fetch_sub(1, std::memory_order_relaxed);
 
         const auto end = std::chrono::steady_clock::now();
@@ -469,6 +472,7 @@ template <typename T> class SearchServer
     uint32_t _et_verify_patience = 1; // consecutive agreeing hops required to stop (1 = first trigger)
     float    _et_theta_exact = std::numeric_limits<float>::max(); // hybrid-exact ET γ (max = disabled)
     uint32_t _et_exact_patience = 1;  // hybrid-exact ET patience (consecutive triggering hops)
+    uint32_t _et_priority_hop_threshold = 0; // CA-IOS: hop count at which to escalate this query's thread to RT ioprio (0 = disabled)
     uint32_t _bnc_seed_nodes = 0;     // warm-start BNC with this many BFS entry-region nodes (0 = off)
 
     std::atomic<int32_t> _active_searches{0};  // requests currently inside cached_beam_search
@@ -490,14 +494,15 @@ int run_search_server(const std::string &index_path_prefix, const diskann::Metri
                       const uint32_t et_conv_delta, const uint32_t et_conv_width, const uint32_t et_min_hops,
                       const float et_verify_alpha, const uint32_t et_verify_patience,
                       const uint32_t bnc_seed_nodes,
-                      const float et_theta_exact, const uint32_t et_exact_patience)
+                      const float et_theta_exact, const uint32_t et_exact_patience,
+                      const uint32_t et_priority_hop_threshold)
 {
     SearchServer<T> server(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                             et_sat_gamma, et_sat_delta, enable_neighbor_cache, neighbor_cache_gb,
                             qd_alpha, io_concurrency, entry_candidates_file,
                             hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
                             et_verify_alpha, et_verify_patience, bnc_seed_nodes,
-                            et_theta_exact, et_exact_patience);
+                            et_theta_exact, et_exact_patience, et_priority_hop_threshold);
     server.serve(port, num_threads);
     return 0;
 }
@@ -526,6 +531,7 @@ int main(int argc, char **argv)
     uint32_t bnc_seed_nodes = 0;
     float et_theta_exact = std::numeric_limits<float>::max();
     uint32_t et_exact_patience = 1;
+    uint32_t et_priority_hop_threshold = 0;
 
     po::options_description desc{"Arguments"};
     try
@@ -600,6 +606,13 @@ int main(int argc, char **argv)
         desc.add_options()("et_exact_patience",
                            po::value<uint32_t>(&et_exact_patience)->default_value(1),
                            "Hybrid-exact ET patience: consecutive triggering hops required before stopping (1 = first trigger).");
+        desc.add_options()("et_priority_hop_threshold",
+                           po::value<uint32_t>(&et_priority_hop_threshold)->default_value(0),
+                           "CA-IOS: once a query's hop count reaches this threshold, escalate its worker thread's "
+                           "I/O priority to RT (ioprio_set) for the rest of that query, so its remaining reads jump "
+                           "the shared NVMe queue ahead of other threads' bulk traffic (0 = disabled). Requires "
+                           "root/CAP_SYS_ADMIN to actually take effect, and requires the block device's scheduler "
+                           "to be mq-deadline (scheduler=none does not honor ioprio) -- see docs/CA-IOS val1.");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -640,7 +653,7 @@ int main(int argc, char **argv)
                                             enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file,
                                             hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
                                             et_verify_alpha, et_verify_patience, bnc_seed_nodes,
-                                            et_theta_exact, et_exact_patience);
+                                            et_theta_exact, et_exact_patience, et_priority_hop_threshold);
         }
         if (data_type == "int8")
         {
@@ -649,7 +662,7 @@ int main(int argc, char **argv)
                                              enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file,
                                             hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
                                             et_verify_alpha, et_verify_patience, bnc_seed_nodes,
-                                            et_theta_exact, et_exact_patience);
+                                            et_theta_exact, et_exact_patience, et_priority_hop_threshold);
         }
         if (data_type == "uint8")
         {
@@ -658,7 +671,7 @@ int main(int argc, char **argv)
                                               enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file,
                                             hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
                                             et_verify_alpha, et_verify_patience, bnc_seed_nodes,
-                                            et_theta_exact, et_exact_patience);
+                                            et_theta_exact, et_exact_patience, et_priority_hop_threshold);
         }
 
         std::cerr << "Unsupported data type " << data_type << std::endl;

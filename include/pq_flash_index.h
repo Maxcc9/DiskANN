@@ -112,7 +112,8 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
                                               const uint32_t et_verify_patience = 1,
                                               const bool et_exact_led = false,
                                               const uint32_t et_exact_patience = 1,
-                                              const float et_exact_beta = std::numeric_limits<float>::max());
+                                              const float et_exact_beta = std::numeric_limits<float>::max(),
+                                              const uint32_t et_priority_hop_threshold = 0);
 
     DISKANN_DLLEXPORT LabelT get_converted_label(const std::string &filter_label);
 
