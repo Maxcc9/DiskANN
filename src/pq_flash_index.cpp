@@ -1456,7 +1456,7 @@ void PQFlashIndex<T, LabelT>::enable_neighbor_cache()
 // budget.  Actual node data is inserted lazily during cached_beam_search().
 // ---------------------------------------------------------------------------
 template <typename T, typename LabelT>
-void PQFlashIndex<T, LabelT>::init_bounded_neighbor_cache(size_t capacity_bytes)
+void PQFlashIndex<T, LabelT>::init_bounded_neighbor_cache(size_t capacity_bytes, uint32_t max_ref_count)
 {
     if (!_load_flag)
     {
@@ -1464,7 +1464,7 @@ void PQFlashIndex<T, LabelT>::init_bounded_neighbor_cache(size_t capacity_bytes)
         return;
     }
     _bounded_cache.init(capacity_bytes, static_cast<uint32_t>(_max_degree), _disk_bytes_per_point,
-                        static_cast<uint32_t>(_max_nthreads));
+                        static_cast<uint32_t>(_max_nthreads), max_ref_count);
     const size_t nodes = _bounded_cache.total_capacity_nodes();
     const double pct   = (_num_points > 0)
                          ? 100.0 * static_cast<double>(nodes) / static_cast<double>(_num_points)

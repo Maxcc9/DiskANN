@@ -155,10 +155,16 @@ class BoundedNeighborCache
     // to a power of two — so shard selection is a bitmask and there is no tuned
     // constant. Because insert() is non-blocking (try-lock, skip on contention),
     // no contention-headroom factor is needed.
-    void init(size_t capacity_bytes, uint32_t max_degree, size_t coord_bytes = 0, uint32_t num_threads = 1)
+    // max_ref_count : CLOCK saturating-counter ceiling (see MAX_REF_COUNT comment below).
+    //   Default 4 = production BNC. Set to 1 to degrade to a plain single-bit
+    //   second-chance CLOCK (e.g. for an ablation against VeloANN-style caches
+    //   that use a binary ref bit instead of a saturating counter).
+    void init(size_t capacity_bytes, uint32_t max_degree, size_t coord_bytes = 0, uint32_t num_threads = 1,
+              uint32_t max_ref_count = 4)
     {
         if (capacity_bytes == 0 || max_degree == 0)
             return;
+        max_ref_count_ = max_ref_count;
 
         // S = 2^ceil(log2(T)): one shard per worker thread, rounded up to a
         // power of two (enables `node_id & (S-1)` indexing instead of modulo).
@@ -254,9 +260,9 @@ class BoundedNeighborCache
             return nullptr;
 
         const uint32_t slot = it->second;
-        // Saturating increment: hot nodes accumulate up to MAX_REF_COUNT chances.
+        // Saturating increment: hot nodes accumulate up to max_ref_count_ chances.
         const uint8_t cur = shard.ref_counts[slot].load(std::memory_order_relaxed);
-        if (cur < MAX_REF_COUNT)
+        if (cur < max_ref_count_)
             shard.ref_counts[slot].store(cur + 1, std::memory_order_relaxed);
         return &shard.entries[slot];
     }
@@ -335,7 +341,7 @@ class BoundedNeighborCache
 
         const uint32_t slot = it->second;
         const uint8_t cur = shard.ref_counts[slot].load(std::memory_order_relaxed);
-        if (cur < MAX_REF_COUNT)
+        if (cur < max_ref_count_)
             shard.ref_counts[slot].store(cur + 1, std::memory_order_relaxed);
         std::memcpy(out_buf, shard.entries[slot].coords, coord_bytes_);
         return true;
@@ -347,10 +353,12 @@ class BoundedNeighborCache
     uint32_t num_shards() const { return num_shards_; }
 
   private:
-    // Saturating upper bound for CLOCK ref counter.
-    // Hot nodes (accessed ≥ MAX_REF_COUNT times between eviction sweeps) survive
-    // MAX_REF_COUNT full CLOCK passes rather than just one.
-    static constexpr uint8_t  MAX_REF_COUNT = 4;
+    // Saturating upper bound for CLOCK ref counter, configurable via init()'s
+    // max_ref_count param (default 4). Hot nodes (accessed >= max_ref_count_
+    // times between eviction sweeps) survive that many full CLOCK passes
+    // rather than just one. Set to 1 for a plain single-bit second-chance
+    // CLOCK (see init()'s doc comment).
+    uint32_t max_ref_count_ = 4;
 
     struct Shard
     {

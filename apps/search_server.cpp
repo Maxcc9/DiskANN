@@ -138,14 +138,17 @@ template <typename T> class SearchServer
                  const uint32_t bnc_seed_nodes = 0,
                  const float et_theta_exact = std::numeric_limits<float>::max(),
                  const uint32_t et_exact_patience = 1,
-                 const uint32_t et_priority_hop_threshold = 0)
+                 const uint32_t et_priority_hop_threshold = 0,
+                 const float et_theta = std::numeric_limits<float>::max(),
+                 const uint32_t bnc_max_ref_count = 4)
         : _beamwidth(beamwidth), _et_sat_gamma(et_sat_gamma), _et_sat_delta(et_sat_delta),
           _qd_alpha(qd_alpha), _io_concurrency(io_concurrency),
           _hop_budget_cap(hop_budget_cap), _et_ref_rank(et_ref_rank), _et_conv_delta(et_conv_delta),
           _et_conv_width(et_conv_width), _et_min_hops(et_min_hops), _et_verify_alpha(et_verify_alpha),
           _et_verify_patience(et_verify_patience), _bnc_seed_nodes(bnc_seed_nodes),
           _et_theta_exact(et_theta_exact), _et_exact_patience(et_exact_patience),
-          _et_priority_hop_threshold(et_priority_hop_threshold)
+          _et_priority_hop_threshold(et_priority_hop_threshold), _et_theta(et_theta),
+          _bnc_max_ref_count(bnc_max_ref_count)
     {
 #ifdef _WINDOWS
         static_assert(false, "search_server is currently implemented for POSIX platforms only.");
@@ -170,7 +173,7 @@ template <typename T> class SearchServer
             // Phase-3: bounded on-demand CLOCK cache (memory-budget controlled)
             const size_t capacity_bytes =
                 static_cast<size_t>(neighbor_cache_gb * 1024.0 * 1024.0 * 1024.0);
-            _index->init_bounded_neighbor_cache(capacity_bytes);
+            _index->init_bounded_neighbor_cache(capacity_bytes, _bnc_max_ref_count);
             if (_bnc_seed_nodes > 0)
                 _index->seed_bounded_cache_bfs(_bnc_seed_nodes); // warm-start BNC with BFS entry region
         }
@@ -387,9 +390,13 @@ template <typename T> class SearchServer
         std::vector<uint64_t> result_ids(request.k);
         std::vector<float> result_dists(request.k);
 
-        // et_theta <= 0 from client means "no θ-ET"; pass FLOAT_MAX to disable the check.
-        float theta = request.et_theta > 0.0f ? request.et_theta
-                                              : std::numeric_limits<float>::max();
+        // et_theta <= 0 from client means "use the server's --et_theta default" (itself
+        // FLT_MAX = disabled unless set at startup). Client value, when positive, always
+        // overrides the server default. Consolidated here so both ET gates (this classic
+        // θ-ET and et_theta_exact below) have their defaults configurable from the same
+        // server CLI surface — see memory/project_dual_gate_et_discovery.md for why the
+        // old split (client-only et_theta vs server-only et_theta_exact) was a footgun.
+        float theta = request.et_theta > 0.0f ? request.et_theta : _et_theta;
 
         // Queue-depth adaptive theta: relax ET threshold under server load.
         // active_searches counts requests currently inside cached_beam_search.
@@ -471,9 +478,14 @@ template <typename T> class SearchServer
     float    _et_verify_alpha = std::numeric_limits<float>::max(); // predict-then-verify layer-2 α (max = disabled)
     uint32_t _et_verify_patience = 1; // consecutive agreeing hops required to stop (1 = first trigger)
     float    _et_theta_exact = std::numeric_limits<float>::max(); // hybrid-exact ET γ (max = disabled)
+    float    _et_theta = std::numeric_limits<float>::max(); // classic θ-ET server-side default (max = disabled;
+                                                              // a positive per-request et_theta from the client
+                                                              // still overrides this)
     uint32_t _et_exact_patience = 1;  // hybrid-exact ET patience (consecutive triggering hops)
     uint32_t _et_priority_hop_threshold = 0; // CA-IOS: hop count at which to escalate this query's thread to RT ioprio (0 = disabled)
     uint32_t _bnc_seed_nodes = 0;     // warm-start BNC with this many BFS entry-region nodes (0 = off)
+    uint32_t _bnc_max_ref_count = 4;  // CLOCK saturating ref-counter ceiling (1 = plain single-bit CLOCK,
+                                      // for an ablation against VeloANN-style caches; default 4 = production)
 
     std::atomic<int32_t> _active_searches{0};  // requests currently inside cached_beam_search
 
@@ -495,14 +507,16 @@ int run_search_server(const std::string &index_path_prefix, const diskann::Metri
                       const float et_verify_alpha, const uint32_t et_verify_patience,
                       const uint32_t bnc_seed_nodes,
                       const float et_theta_exact, const uint32_t et_exact_patience,
-                      const uint32_t et_priority_hop_threshold)
+                      const uint32_t et_priority_hop_threshold, const float et_theta,
+                      const uint32_t bnc_max_ref_count)
 {
     SearchServer<T> server(index_path_prefix, metric, num_nodes_to_cache, num_threads, beamwidth,
                             et_sat_gamma, et_sat_delta, enable_neighbor_cache, neighbor_cache_gb,
                             qd_alpha, io_concurrency, entry_candidates_file,
                             hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
                             et_verify_alpha, et_verify_patience, bnc_seed_nodes,
-                            et_theta_exact, et_exact_patience, et_priority_hop_threshold);
+                            et_theta_exact, et_exact_patience, et_priority_hop_threshold, et_theta,
+                            bnc_max_ref_count);
     server.serve(port, num_threads);
     return 0;
 }
@@ -532,6 +546,8 @@ int main(int argc, char **argv)
     float et_theta_exact = std::numeric_limits<float>::max();
     uint32_t et_exact_patience = 1;
     uint32_t et_priority_hop_threshold = 0;
+    float et_theta = std::numeric_limits<float>::max();
+    uint32_t bnc_max_ref_count = 4;
 
     po::options_description desc{"Arguments"};
     try
@@ -606,6 +622,20 @@ int main(int argc, char **argv)
         desc.add_options()("et_exact_patience",
                            po::value<uint32_t>(&et_exact_patience)->default_value(1),
                            "Hybrid-exact ET patience: consecutive triggering hops required before stopping (1 = first trigger).");
+        desc.add_options()("et_theta",
+                           po::value<float>(&et_theta)->default_value(std::numeric_limits<float>::max()),
+                           "Classic θ-ET server-side default (FLT_MAX = disabled). A per-request et_theta sent by "
+                           "the client (positive value) always overrides this; the client sending 0 falls back to "
+                           "this default instead of forcing the gate off. Consolidates θ-ET config onto the server "
+                           "CLI alongside et_theta_exact (previously et_theta was client-only, which is how the two "
+                           "gates went unnoticed running simultaneously for a long time -- see "
+                           "memory/project_dual_gate_et_discovery.md).");
+        desc.add_options()("bnc_max_ref_count",
+                           po::value<uint32_t>(&bnc_max_ref_count)->default_value(4),
+                           "BNC CLOCK saturating ref-counter ceiling (default 4 = production). Set to 1 "
+                           "to degrade to a plain single-bit second-chance CLOCK, for an ablation against "
+                           "VeloANN-style caches that lack a saturating counter (see "
+                           "memory/project_cache_final_verdict.md discussion).");
         desc.add_options()("et_priority_hop_threshold",
                            po::value<uint32_t>(&et_priority_hop_threshold)->default_value(0),
                            "CA-IOS: once a query's hop count reaches this threshold, escalate its worker thread's "
@@ -653,7 +683,8 @@ int main(int argc, char **argv)
                                             enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file,
                                             hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
                                             et_verify_alpha, et_verify_patience, bnc_seed_nodes,
-                                            et_theta_exact, et_exact_patience, et_priority_hop_threshold);
+                                            et_theta_exact, et_exact_patience, et_priority_hop_threshold, et_theta,
+                                            bnc_max_ref_count);
         }
         if (data_type == "int8")
         {
@@ -662,7 +693,8 @@ int main(int argc, char **argv)
                                              enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file,
                                             hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
                                             et_verify_alpha, et_verify_patience, bnc_seed_nodes,
-                                            et_theta_exact, et_exact_patience, et_priority_hop_threshold);
+                                            et_theta_exact, et_exact_patience, et_priority_hop_threshold, et_theta,
+                                            bnc_max_ref_count);
         }
         if (data_type == "uint8")
         {
@@ -671,7 +703,8 @@ int main(int argc, char **argv)
                                               enable_neighbor_cache, neighbor_cache_gb, qd_alpha, io_concurrency, entry_candidates_file,
                                             hop_budget_cap, et_ref_rank, et_conv_delta, et_conv_width, et_min_hops,
                                             et_verify_alpha, et_verify_patience, bnc_seed_nodes,
-                                            et_theta_exact, et_exact_patience, et_priority_hop_threshold);
+                                            et_theta_exact, et_exact_patience, et_priority_hop_threshold, et_theta,
+                                            bnc_max_ref_count);
         }
 
         std::cerr << "Unsupported data type " << data_type << std::endl;

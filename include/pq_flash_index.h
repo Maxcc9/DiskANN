@@ -171,7 +171,7 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
     // Enable Phase-3 Bounded Neighbor-ID Cache: on-demand LRU (CLOCK) cache
     // bounded by capacity_bytes.  Nodes are inserted lazily on disk-read.
     // Must be called after load() / load_from_separate_paths().
-    DISKANN_DLLEXPORT void init_bounded_neighbor_cache(size_t capacity_bytes);
+    DISKANN_DLLEXPORT void init_bounded_neighbor_cache(size_t capacity_bytes, uint32_t max_ref_count = 4);
 
     // Pre-seed the bounded (dynamic) cache with the BFS entry-region nodes at
     // startup. Unlike a separate static cache, seeded nodes are ordinary BNC

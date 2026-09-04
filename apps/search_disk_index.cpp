@@ -68,7 +68,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       const uint32_t et_verify_patience = 1,
                       const bool et_exact_led = false,
                       const uint32_t et_exact_patience = 1,
-                      const float et_exact_beta = std::numeric_limits<float>::max())
+                      const float et_exact_beta = std::numeric_limits<float>::max(),
+                      const uint32_t bnc_max_ref_count = 4)
 {
     // Leave-one-out self-exclusion ids (one per query; base-vector-as-query training).
     std::vector<uint32_t> self_ids;
@@ -153,7 +154,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     if (neighbor_cache_gb > 0.0)
     {
         size_t capacity_bytes = static_cast<size_t>(neighbor_cache_gb * 1024.0 * 1024.0 * 1024.0);
-        _pFlashIndex->init_bounded_neighbor_cache(capacity_bytes);
+        _pFlashIndex->init_bounded_neighbor_cache(capacity_bytes, bnc_max_ref_count);
         diskann::cout << "[BNC] Bounded neighbor cache enabled: " << neighbor_cache_gb << " GB" << std::endl;
     }
 
@@ -435,6 +436,7 @@ int main(int argc, char **argv)
     bool et_exact_led = false;
     uint32_t et_exact_patience = 1;
     float et_exact_beta = std::numeric_limits<float>::max();
+    uint32_t bnc_max_ref_count = 4;
 
     po::options_description desc{
         program_options_utils::make_program_description("search_disk_index", "Searches on-disk DiskANN indexes")};
@@ -550,6 +552,11 @@ int main(int argc, char **argv)
                                        po::value<float>(&et_exact_beta)->default_value(std::numeric_limits<float>::max()),
                                        "Dual-rail ET: exact-convergence rail beta (FLT_MAX=disabled). Fires when "
                                        "k2-th EXACT < (best EXACT)*beta (top collapsed to plateau). PQ rail uses et_theta_exact (=alpha).");
+        optional_configs.add_options()("bnc_max_ref_count",
+                                       po::value<uint32_t>(&bnc_max_ref_count)->default_value(4),
+                                       "BNC CLOCK saturating ref-counter ceiling (default 4 = production). Set to 1 "
+                                       "to degrade to a plain single-bit second-chance CLOCK, for an ablation "
+                                       "against VeloANN-style caches that lack a saturating counter.");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -658,21 +665,21 @@ int main(int argc, char **argv)
                                                 fail_if_recall_below, query_filters, use_reorder_data, et_theta,
                                                 et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb,
                                                 et_theta_exact, et_ref_rank, et_min_hops, oracle_hops, et_conv_delta, et_conv_width,
-                    dump_features, self_ids_file, et_verify_alpha, et_verify_patience, et_exact_led, et_exact_patience, et_exact_beta);
+                    dump_features, self_ids_file, et_verify_alpha, et_verify_patience, et_exact_led, et_exact_patience, et_exact_beta, bnc_max_ref_count);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                  num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                  fail_if_recall_below, query_filters, use_reorder_data, et_theta,
                                                  et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb,
                                                  et_theta_exact, et_ref_rank, et_min_hops, oracle_hops, et_conv_delta, et_conv_width,
-                    dump_features, self_ids_file, et_verify_alpha, et_verify_patience, et_exact_led, et_exact_patience, et_exact_beta);
+                    dump_features, self_ids_file, et_verify_alpha, et_verify_patience, et_exact_led, et_exact_patience, et_exact_beta, bnc_max_ref_count);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                   num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
                                                   fail_if_recall_below, query_filters, use_reorder_data, et_theta,
                                                   et_dk, hop_budget, et_sat_gamma, et_sat_delta, neighbor_cache_gb,
                                                  et_theta_exact, et_ref_rank, et_min_hops, oracle_hops, et_conv_delta, et_conv_width,
-                    dump_features, self_ids_file, et_verify_alpha, et_verify_patience, et_exact_led, et_exact_patience, et_exact_beta);
+                    dump_features, self_ids_file, et_verify_alpha, et_verify_patience, et_exact_led, et_exact_patience, et_exact_beta, bnc_max_ref_count);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;
