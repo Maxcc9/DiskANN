@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -347,6 +348,10 @@ template <typename T> class SearchServer
         // Control message: k == 0 signals a control command (no query vector body).
         //   l == 1 → freeze bounded cache (lock warm state; stop inserts)
         //   l == 2 → unfreeze bounded cache (resume inserts)
+        //   l == 3 → read global SSD-read counter        (T5)
+        //   l == 4 → reset global SSD-read counter       (T5)
+        //   l == 5 → enable node-visit counting          (R2 instrumentation)
+        //   l == 6 → dump node-visit counts to $PACEANN_VISIT_DUMP (R2)
         // Reply is a bare 12-byte ResponseHeader so the client can synchronise.
         if (request.k == 0)
         {
@@ -359,6 +364,21 @@ template <typename T> class SearchServer
                 ctl_ret = _index->get_io_count();   // T5: read global SSD-read counter
             else if (request.l == 4)
                 _index->reset_io_count();           // T5: reset counter
+            else if (request.l == 5)
+                _index->enable_visit_counting();    // R2: allocate + zero the counter array
+            else if (request.l == 6)
+            {
+                // R2: the dump path comes from the environment rather than the
+                // wire protocol -- the fixed 16-byte request header has nowhere
+                // to put a string, and keeping it out of the CLI makes it plain
+                // that this is instrumentation, not a serving feature.
+                const char *dump_path = std::getenv("PACEANN_VISIT_DUMP");
+                if (dump_path == nullptr)
+                {
+                    throw std::runtime_error("visit-count dump requested but PACEANN_VISIT_DUMP is not set");
+                }
+                ctl_ret = _index->dump_visit_counts(dump_path);
+            }
             ResponseHeader control_resp{request.query_id, ctl_ret};
             send_all(client_fd, &control_resp, sizeof(control_resp));
             return;

@@ -9,6 +9,7 @@
 #include "pq_scratch.h"
 #include "pq_flash_index.h"
 #include "cosine_similarity.h"
+#include <fstream>
 
 #ifdef _WINDOWS
 #include "windows_aligned_file_reader.h"
@@ -348,6 +349,72 @@ void PQFlashIndex<T, LabelT>::seed_bounded_cache_bfs(uint64_t num_seed_nodes)
         }
     }
     diskann::cout << "done." << std::endl;
+}
+
+// ---------------------------------------------------------------------------
+// R2 instrumentation: node-access-frequency counting.
+//
+// The counting itself already exists on the search path (guarded by
+// `_count_visited_nodes`, which `generate_cache_list_from_sample_queries` uses
+// for static-cache selection).  These two entry points only let a client turn
+// it on at run time and read the result out, so nothing is added to the hot
+// path and nothing is allocated unless counting is explicitly requested.
+// ---------------------------------------------------------------------------
+template <typename T, typename LabelT> void PQFlashIndex<T, LabelT>::enable_visit_counting()
+{
+    // Re-establish position == node id.  The search path increments
+    // `_node_visit_counter[id].second` by position, and
+    // `generate_cache_list_from_sample_queries` may have left the array sorted
+    // by count, so the identity ordering has to be restored before counting.
+    this->_node_visit_counter.assign(this->_num_points, std::make_pair(0u, 0u));
+    for (uint32_t i = 0; i < this->_node_visit_counter.size(); i++)
+    {
+        this->_node_visit_counter[i].first = i;
+    }
+    this->_count_visited_nodes = true;
+    diskann::cout << "visit counting enabled for " << this->_num_points << " nodes ("
+                  << (this->_num_points * sizeof(std::pair<uint32_t, uint32_t>)) / (1024 * 1024)
+                  << " MB instrumentation array)" << std::endl;
+}
+
+// Writes { uint64 num_points, uint32 count[num_points] } in node-id order.
+// Returns the number of nodes visited at least once.
+template <typename T, typename LabelT> uint64_t PQFlashIndex<T, LabelT>::dump_visit_counts(const std::string &path)
+{
+    this->_count_visited_nodes = false;
+    if (this->_node_visit_counter.size() != this->_num_points)
+    {
+        throw diskann::ANNException("dump_visit_counts called without enable_visit_counting", -1);
+    }
+
+    std::vector<uint32_t> counts(this->_num_points);
+    uint64_t nonzero = 0;
+    for (uint64_t i = 0; i < this->_num_points; i++)
+    {
+        counts[i] = this->_node_visit_counter[i].second;
+        if (counts[i] != 0)
+        {
+            nonzero++;
+        }
+    }
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out)
+    {
+        throw diskann::ANNException("could not open visit-count dump file " + path, -1);
+    }
+    const uint64_t n = this->_num_points;
+    out.write(reinterpret_cast<const char *>(&n), sizeof(n));
+    out.write(reinterpret_cast<const char *>(counts.data()), static_cast<std::streamsize>(n * sizeof(uint32_t)));
+    out.close();
+    if (!out)
+    {
+        throw diskann::ANNException("failed while writing visit-count dump file " + path, -1);
+    }
+
+    diskann::cout << "dumped visit counts to " << path << " (" << nonzero << " / " << n << " nodes visited)"
+                  << std::endl;
+    return nonzero;
 }
 
 #ifdef EXEC_ENV_OLS

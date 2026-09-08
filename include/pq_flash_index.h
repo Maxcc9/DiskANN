@@ -145,6 +145,18 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
     uint64_t get_io_count() const { return _global_io_count.load(std::memory_order_relaxed); }
     void reset_io_count() { _global_io_count.store(0, std::memory_order_relaxed); }
 
+    // R2 instrumentation (measurement apparatus, NOT part of the system under
+    // test): per-node access counting, used to plot the node-access-frequency
+    // distribution.  The counter array costs 8 B/node (800 MB at 100M points),
+    // which would break the equal-memory-budget protocol -- so it is allocated
+    // only when a client explicitly turns counting on through the control
+    // channel.  A normal run never allocates it and never leaves the existing
+    // `_count_visited_nodes == false` fast path, so headline numbers are
+    // unaffected.  Runs that do turn it on must be reported as an
+    // instrumentation build and kept out of headline numbers.
+    DISKANN_DLLEXPORT void enable_visit_counting();
+    DISKANN_DLLEXPORT uint64_t dump_visit_counts(const std::string &path);
+
     std::shared_ptr<AlignedFileReader> &reader;
 
     DISKANN_DLLEXPORT diskann::Metric get_metric();
